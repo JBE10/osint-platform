@@ -1,0 +1,16 @@
+# Grafana dashboard provisioning
+
+apiVersion: 1
+
+providers:
+  - name: 'OSINT Platform Dashboards'
+    orgId: 1
+    folder: 'OSINT Platform'
+    folderUid: 'osint-platform'
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+

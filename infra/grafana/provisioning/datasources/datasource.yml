@@ -1,0 +1,39 @@
+# Grafana datasource provisioning
+
+apiVersion: 1
+
+datasources:
+  # Prometheus - Primary metrics store
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      manageAlerts: true
+      prometheusType: Prometheus
+      prometheusVersion: "2.45.0"
+
+  # PostgreSQL - Direct database queries (optional)
+  # - name: PostgreSQL
+  #   type: postgres
+  #   url: postgres:5432
+  #   database: osint_platform
+  #   user: osint
+  #   secureJsonData:
+  #     password: ${POSTGRES_PASSWORD}
+  #   jsonData:
+  #     sslmode: disable
+  #     maxOpenConns: 5
+  #     maxIdleConns: 2
+  #     connMaxLifetime: 14400
+
+  # Redis (requires redis datasource plugin)
+  # - name: Redis
+  #   type: redis-datasource
+  #   url: redis:6379
+  #   isDefault: false
+  #   editable: false
+

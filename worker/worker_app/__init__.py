@@ -1,0 +1,2 @@
+"""OSINT Platform Worker Service."""
+
