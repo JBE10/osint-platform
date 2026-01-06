@@ -20,22 +20,18 @@ def send_job_to_celery(job: Job) -> str:
     """
     Send a job to the Celery worker.
     
+    Contract: Worker receives ONLY job_id.
+    Worker must rehydrate job from DB (source of truth).
+    
     Returns the Celery task ID.
     """
-    # Map job types to Celery task names
-    task_name = f"worker_app.tasks.{job.job_type}"
-    
-    # Send task
+    # Single unified task: execute_job
+    # Worker rehydrates job from DB using job_id
     result = celery_app.send_task(
-        task_name,
-        kwargs={
-            "job_id": str(job.id),
-            "workspace_id": str(job.workspace_id),
-            "target_id": str(job.target_id),
-            "config": job.config,
-        },
+        "worker_app.tasks.execute_job",
+        kwargs={"job_id": str(job.id)},
         queue="default",
+        priority=job.priority,  # Celery priority (lower = higher)
     )
     
     return result.id
-

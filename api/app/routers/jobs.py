@@ -1,4 +1,4 @@
-"""Job management endpoints."""
+"""Job management endpoints - Full state machine flow."""
 from typing import Annotated, Optional
 from uuid import UUID
 from datetime import datetime
@@ -13,7 +13,8 @@ from app.core.deps import CurrentUser, require_analyst, require_viewer
 from app.core.audit import create_audit_log
 from app.models.workspace import WorkspaceMember
 from app.models.target import Target
-from app.models.job import Job, JobStatus, JobType, generate_idempotency_key
+from app.models.job import Job, JobStatus, TechniqueCode, generate_idempotency_key
+from app.models.finding import Finding
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/jobs", tags=["jobs"])
 
@@ -25,8 +26,10 @@ router = APIRouter(prefix="/workspaces/{workspace_id}/jobs", tags=["jobs"])
 class JobCreate(BaseModel):
     """Create a new job."""
     target_id: UUID
-    job_type: str
-    config: dict = {}
+    technique_code: str
+    params: dict = {}
+    priority: int = 5  # 1=highest, 10=lowest
+    max_attempts: int = 3
 
 
 class JobResponse(BaseModel):
@@ -34,18 +37,35 @@ class JobResponse(BaseModel):
     id: UUID
     workspace_id: UUID
     target_id: UUID
-    job_type: str
+    technique_code: str
     status: str
-    config: dict
-    result: Optional[dict] = None
+    priority: int
+    attempt: int
+    max_attempts: int
+    params_json: dict
+    error_code: Optional[str] = None
     error_message: Optional[str] = None
-    raw_evidence_path: Optional[str] = None
-    retry_count: int
-    max_retries: int
+    trace_id: Optional[str] = None
+    celery_task_id: Optional[str] = None
     created_at: datetime
-    queued_at: Optional[datetime] = None
+    scheduled_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class FindingResponse(BaseModel):
+    """Finding response."""
+    id: UUID
+    job_id: UUID
+    finding_type: str
+    subject: str
+    confidence: int
+    data_json: dict
+    first_seen_at: datetime
+    last_seen_at: datetime
 
     class Config:
         from_attributes = True
@@ -65,17 +85,21 @@ def create_job(
     membership: Annotated[WorkspaceMember, Depends(require_analyst)],
 ):
     """
-    Create a new job. Requires ANALYST role.
+    Create a new job (status=CREATED). Requires ANALYST role.
     
-    Uses idempotency_key to prevent duplicate jobs for same target+type+config.
+    Flow: POST /jobs → status=CREATED
+          POST /jobs/{id}/enqueue → status=QUEUED (sent to Celery)
+    
+    Uses idempotency_key: sha256(workspace+target+technique+params+v1)
+    If job already exists with same key → returns existing job (no duplicate).
     """
-    # Validate job type
+    # Validate technique code
     try:
-        JobType(data.job_type)
+        TechniqueCode(data.technique_code)
     except ValueError:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid job_type. Valid types: {[t.value for t in JobType]}",
+            detail=f"Invalid technique_code. Valid: {[t.value for t in TechniqueCode]}",
         )
     
     # Verify target exists and belongs to workspace
@@ -93,8 +117,8 @@ def create_job(
     idempotency_key = generate_idempotency_key(
         workspace_id=workspace_id,
         target_id=data.target_id,
-        job_type=data.job_type,
-        config=data.config,
+        technique_code=data.technique_code,
+        params=data.params,
     )
     
     # Check for existing job with same idempotency key
@@ -103,17 +127,19 @@ def create_job(
     ).scalar_one_or_none()
     
     if existing:
-        # Return existing job (idempotent)
+        # Idempotent: return existing job
         return existing
     
-    # Create new job
+    # Create new job (status=CREATED)
     job = Job(
         workspace_id=workspace_id,
         target_id=data.target_id,
-        created_by=user.id,
-        job_type=data.job_type,
-        config=data.config,
+        technique_code=data.technique_code,
+        params_json=data.params,
+        priority=data.priority,
+        max_attempts=data.max_attempts,
         idempotency_key=idempotency_key,
+        status=JobStatus.CREATED.value,
     )
     db.add(job)
     db.commit()
@@ -128,7 +154,7 @@ def create_job(
         workspace_id=workspace_id,
         actor_user_id=user.id,
         request=request,
-        details={"job_type": data.job_type, "target_id": str(data.target_id)},
+        details={"technique_code": data.technique_code, "target_id": str(data.target_id)},
     )
     
     return job
@@ -142,6 +168,7 @@ def list_jobs(
     membership: Annotated[WorkspaceMember, Depends(require_viewer)],
     status_filter: Optional[str] = Query(None, alias="status"),
     target_id: Optional[UUID] = None,
+    technique_code: Optional[str] = None,
     limit: int = Query(50, le=100),
     offset: int = 0,
 ):
@@ -152,6 +179,8 @@ def list_jobs(
         query = query.where(Job.status == status_filter)
     if target_id:
         query = query.where(Job.target_id == target_id)
+    if technique_code:
+        query = query.where(Job.technique_code == technique_code)
     
     query = query.order_by(Job.created_at.desc()).limit(limit).offset(offset)
     
@@ -181,6 +210,33 @@ def get_job(
     return job
 
 
+@router.get("/{job_id}/findings", response_model=list[FindingResponse])
+def get_job_findings(
+    workspace_id: UUID,
+    job_id: UUID,
+    user: CurrentUser,
+    db: Annotated[Session, Depends(get_db)],
+    membership: Annotated[WorkspaceMember, Depends(require_viewer)],
+):
+    """Get findings for a job. Requires VIEWER role."""
+    # Verify job exists
+    job = db.execute(
+        select(Job).where(
+            Job.id == job_id,
+            Job.workspace_id == workspace_id,
+        )
+    ).scalar_one_or_none()
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    findings = db.execute(
+        select(Finding).where(Finding.job_id == job_id)
+    ).scalars().all()
+    
+    return findings
+
+
 @router.post("/{job_id}/enqueue", response_model=JobResponse)
 def enqueue_job(
     workspace_id: UUID,
@@ -191,7 +247,9 @@ def enqueue_job(
     membership: Annotated[WorkspaceMember, Depends(require_analyst)],
 ):
     """
-    Enqueue a PENDING job to Celery. Requires ANALYST role.
+    Enqueue a CREATED job to Celery → status=QUEUED. Requires ANALYST role.
+    
+    This is the transition: CREATED → QUEUED
     """
     job = db.execute(
         select(Job).where(
@@ -206,14 +264,14 @@ def enqueue_job(
     if not job.can_transition_to(JobStatus.QUEUED):
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot enqueue job in {job.status} state",
+            detail=f"Cannot enqueue job in {job.status} state. Valid: CREATED",
         )
     
     # Send to Celery
     from app.core.celery_client import send_job_to_celery
     celery_task_id = send_job_to_celery(job)
     
-    # Update job
+    # Update job: CREATED → QUEUED
     job.transition_to(JobStatus.QUEUED)
     job.celery_task_id = celery_task_id
     db.commit()
@@ -234,8 +292,8 @@ def enqueue_job(
     return job
 
 
-@router.post("/{job_id}/retry", response_model=JobResponse)
-def retry_job(
+@router.post("/{job_id}/requeue", response_model=JobResponse)
+def requeue_job(
     workspace_id: UUID,
     job_id: UUID,
     request: Request,
@@ -244,7 +302,9 @@ def retry_job(
     membership: Annotated[WorkspaceMember, Depends(require_analyst)],
 ):
     """
-    Retry a FAILED job. Requires ANALYST role.
+    Re-queue a FAILED or DEAD_LETTER job. Requires ANALYST role.
+    
+    Transitions: RETRYING → QUEUED (auto), FAILED → QUEUED (manual), DEAD_LETTER → QUEUED (manual)
     """
     job = db.execute(
         select(Job).where(
@@ -256,20 +316,28 @@ def retry_job(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
-    if not job.can_retry:
+    # Can requeue from RETRYING, FAILED, or DEAD_LETTER
+    if job.status not in (JobStatus.RETRYING.value, JobStatus.FAILED.value, JobStatus.DEAD_LETTER.value):
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot retry job (status={job.status}, retries={job.retry_count}/{job.max_retries})",
+            detail=f"Cannot requeue job in {job.status} state. Valid: RETRYING, FAILED, DEAD_LETTER",
         )
     
-    # Increment retry count and re-enqueue
-    job.retry_count += 1
-    job.error_message = None
+    # For DEAD_LETTER, reset attempts (manual intervention)
+    if job.status == JobStatus.DEAD_LETTER.value:
+        job.attempt = 0
     
+    # Clear error
+    job.error_code = None
+    job.error_message = None
+    job.finished_at = None
+    
+    # Send to Celery
     from app.core.celery_client import send_job_to_celery
     celery_task_id = send_job_to_celery(job)
     
-    job.transition_to(JobStatus.QUEUED)
+    # Force transition to QUEUED (bypass state machine for manual intervention)
+    job.status = JobStatus.QUEUED.value
     job.celery_task_id = celery_task_id
     db.commit()
     db.refresh(job)
@@ -277,13 +345,13 @@ def retry_job(
     # Audit
     create_audit_log(
         db=db,
-        action="job.retry",
+        action="job.requeue",
         resource_type="job",
         resource_id=job.id,
         workspace_id=workspace_id,
         actor_user_id=user.id,
         request=request,
-        details={"retry_count": job.retry_count},
+        details={"celery_task_id": celery_task_id, "attempt": job.attempt},
     )
     
     return job
@@ -299,7 +367,9 @@ def cancel_job(
     membership: Annotated[WorkspaceMember, Depends(require_analyst)],
 ):
     """
-    Cancel a PENDING or QUEUED job. Requires ANALYST role.
+    Cancel a CREATED or QUEUED job. Requires ANALYST role.
+    
+    Transition: CREATED → CANCELLED, QUEUED → CANCELLED
     """
     job = db.execute(
         select(Job).where(
@@ -314,7 +384,7 @@ def cancel_job(
     if not job.can_transition_to(JobStatus.CANCELLED):
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot cancel job in {job.status} state",
+            detail=f"Cannot cancel job in {job.status} state. Valid: CREATED, QUEUED",
         )
     
     job.transition_to(JobStatus.CANCELLED)
@@ -333,4 +403,3 @@ def cancel_job(
     )
     
     return job
-

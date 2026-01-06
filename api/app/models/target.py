@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional, TYPE_CHECKING
 
-from sqlalchemy import String, DateTime, Text, ForeignKey, func, Index
+from sqlalchemy import String, DateTime, ForeignKey, func, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -12,6 +12,7 @@ from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.job import Job
+    from app.models.finding import Finding
 
 
 class TargetType(str, Enum):
@@ -44,8 +45,8 @@ class Target(Base):
     value: Mapped[str] = mapped_column(String(500), nullable=False)
     label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     
-    # Metadata
-    metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # Extra data
+    extra_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -53,3 +54,4 @@ class Target(Base):
     
     # Relationships
     jobs: Mapped[list["Job"]] = relationship("Job", back_populates="target", cascade="all, delete-orphan")
+    findings: Mapped[list["Finding"]] = relationship("Finding", back_populates="target", cascade="all, delete-orphan")

@@ -4,6 +4,8 @@ from app.routers.auth import router as auth_router
 from app.routers.workspaces import router as workspaces_router
 from app.routers.targets import router as targets_router
 from app.routers.jobs import router as jobs_router
+from app.routers.findings import router as findings_router
+from app.routers.evidence import router as evidence_router
 from app.core.logging import setup_logging
 from app.core.rate_limit import RateLimitMiddleware
 
@@ -20,6 +22,8 @@ app.include_router(auth_router)
 app.include_router(workspaces_router)
 app.include_router(targets_router)
 app.include_router(jobs_router)
+app.include_router(findings_router)
+app.include_router(evidence_router)
 
 
 @app.get("/")

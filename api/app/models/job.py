@@ -1,11 +1,12 @@
 """Job model - Source of truth for OSINT tasks."""
 import hashlib
+import json
 import uuid
 from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from sqlalchemy import String, DateTime, Integer, Text, ForeignKey, func, Index
+from sqlalchemy import String, DateTime, Integer, Text, ForeignKey, func, Index, CheckConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -13,62 +14,89 @@ from app.db.base import Base
 
 
 class JobStatus(str, Enum):
-    """Finite state machine for jobs."""
-    PENDING = "PENDING"      # Created, not yet queued
-    QUEUED = "QUEUED"        # Sent to Celery
-    RUNNING = "RUNNING"      # Being executed
-    COMPLETED = "COMPLETED"  # Success
-    FAILED = "FAILED"        # Error (may retry)
-    CANCELLED = "CANCELLED"  # Manually cancelled
+    """
+    Finite state machine for jobs.
+    
+    CREATED → QUEUED → RUNNING → SUCCEEDED
+                         ↓
+                      RETRYING → FAILED → DEAD_LETTER
+                         ↑_________|
+    """
+    CREATED = "CREATED"          # Job persistido, aún no enviado a Celery
+    QUEUED = "QUEUED"            # Enviado al broker
+    RUNNING = "RUNNING"          # Worker lo tomó
+    RETRYING = "RETRYING"        # Falló pero reintentará
+    SUCCEEDED = "SUCCEEDED"      # Final feliz
+    FAILED = "FAILED"            # Error no recuperable
+    DEAD_LETTER = "DEAD_LETTER"  # Agotó reintentos
+    CANCELLED = "CANCELLED"      # Cancelado manualmente
 
 
-class JobType(str, Enum):
-    """Types of OSINT jobs."""
+class TechniqueCode(str, Enum):
+    """OSINT technique codes."""
     DNS_LOOKUP = "dns_lookup"
     WHOIS_LOOKUP = "whois_lookup"
     EMAIL_VERIFY = "email_verify"
     SUBDOMAIN_ENUM = "subdomain_enum"
     PORT_SCAN = "port_scan"
     SCREENSHOT = "screenshot"
+    SOCIAL_LOOKUP = "social_lookup"
+    BREACH_CHECK = "breach_check"
 
 
 # Valid state transitions
 VALID_TRANSITIONS = {
-    JobStatus.PENDING: [JobStatus.QUEUED, JobStatus.CANCELLED],
-    JobStatus.QUEUED: [JobStatus.RUNNING, JobStatus.FAILED, JobStatus.CANCELLED],
-    JobStatus.RUNNING: [JobStatus.COMPLETED, JobStatus.FAILED],
-    JobStatus.COMPLETED: [],  # Terminal
-    JobStatus.FAILED: [JobStatus.QUEUED],  # Can retry
+    JobStatus.CREATED: [JobStatus.QUEUED, JobStatus.CANCELLED],
+    JobStatus.QUEUED: [JobStatus.RUNNING, JobStatus.CANCELLED],
+    JobStatus.RUNNING: [JobStatus.SUCCEEDED, JobStatus.RETRYING, JobStatus.FAILED],
+    JobStatus.RETRYING: [JobStatus.QUEUED],  # Re-enqueue
+    JobStatus.SUCCEEDED: [],  # Terminal
+    JobStatus.FAILED: [JobStatus.DEAD_LETTER, JobStatus.QUEUED],  # Can manually re-queue
+    JobStatus.DEAD_LETTER: [JobStatus.QUEUED],  # Can manually re-queue
     JobStatus.CANCELLED: [],  # Terminal
 }
+
+
+def canonical_json(obj: dict) -> str:
+    """Generate canonical JSON string for hashing."""
+    return json.dumps(obj, sort_keys=True, separators=(',', ':'), default=str)
 
 
 def generate_idempotency_key(
     workspace_id: uuid.UUID,
     target_id: uuid.UUID,
-    job_type: str,
-    config: dict,
+    technique_code: str,
+    params: dict,
+    version: str = "v1",
 ) -> str:
     """
     Generate deterministic idempotency key.
+    
+    Formula: sha256(workspace_id + target_id + technique_code + canonical_json(params) + version)
     Same input = same key = prevents duplicate jobs.
     """
-    # Sort config keys for deterministic hash
-    config_str = str(sorted(config.items())) if config else ""
-    data = f"{workspace_id}:{target_id}:{job_type}:{config_str}"
-    return hashlib.sha256(data.encode()).hexdigest()[:32]
+    data = f"{workspace_id}{target_id}{technique_code}{canonical_json(params or {})}{version}"
+    return hashlib.sha256(data.encode()).hexdigest()
 
 
 class Job(Base):
     """
     Job model - Source of truth for all OSINT tasks.
-    Celery is just the executor; this table owns the state.
+    
+    Design principles:
+    - Celery is just the executor; this table owns the state
+    - Raw evidence stored separately in raw_evidence table (linked to MinIO)
+    - Findings normalized in findings table for querying
+    - Idempotency key prevents duplicate jobs
     """
     __tablename__ = "jobs"
     __table_args__ = (
         Index("ix_jobs_workspace_status", "workspace_id", "status"),
-        Index("ix_jobs_target_status", "target_id", "status"),
-        Index("ix_jobs_idempotency", "idempotency_key", unique=True),
+        Index("ix_jobs_target", "target_id"),
+        CheckConstraint(
+            "status IN ('CREATED', 'QUEUED', 'RUNNING', 'RETRYING', 'SUCCEEDED', 'FAILED', 'DEAD_LETTER', 'CANCELLED')",
+            name="ck_jobs_status"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -77,43 +105,46 @@ class Job(Base):
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
     )
+    investigation_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True  # Future: FK to investigations table
+    )
     target_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("targets.id", ondelete="CASCADE"), nullable=False
     )
-    created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     
-    # Job type and status
-    job_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default=JobStatus.PENDING.value, index=True)
-    
-    # Idempotency (prevents duplicate jobs)
-    idempotency_key: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
-    
-    # Celery task tracking
-    celery_task_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
-    
-    # Configuration (input params)
-    config: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    
-    # Results
-    result: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    
-    # Raw evidence location (MinIO path)
-    raw_evidence_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    # Job definition
+    technique_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default=JobStatus.CREATED.value, index=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=5)  # 1=highest, 10=lowest
     
     # Retry tracking
-    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    
+    # Idempotency (prevents duplicate jobs)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    
+    # Parameters (input)
+    params_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     
     # Timestamps
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    queued_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    scheduled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)  # Future scheduling
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    
+    # Error tracking
+    error_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    
+    # Observability
+    trace_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)  # For distributed tracing
+    celery_task_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     
     # Relationships
     target = relationship("Target", back_populates="jobs")
+    raw_evidences = relationship("RawEvidence", back_populates="job", cascade="all, delete-orphan")
+    findings = relationship("Finding", back_populates="job", cascade="all, delete-orphan")
 
     def can_transition_to(self, new_status: JobStatus) -> bool:
         """Check if transition to new_status is valid."""
@@ -128,26 +159,36 @@ class Job(Base):
         
         # Update timestamps based on state
         now = datetime.utcnow()
-        if new_status == JobStatus.QUEUED:
-            self.queued_at = now
-        elif new_status == JobStatus.RUNNING:
+        if new_status == JobStatus.RUNNING:
             self.started_at = now
-        elif new_status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
-            self.completed_at = now
+            self.attempt += 1
+        elif new_status in (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.DEAD_LETTER, JobStatus.CANCELLED):
+            self.finished_at = now
         
         return True
     
     @property
     def can_retry(self) -> bool:
         """Check if job can be retried."""
-        return (
-            self.status == JobStatus.FAILED.value
-            and self.retry_count < self.max_retries
-        )
+        return self.attempt < self.max_attempts
+    
+    @property
+    def should_dead_letter(self) -> bool:
+        """Check if job should go to dead letter queue."""
+        return self.attempt >= self.max_attempts
     
     @property
     def duration_seconds(self) -> Optional[float]:
         """Calculate job duration in seconds."""
-        if self.started_at and self.completed_at:
-            return (self.completed_at - self.started_at).total_seconds()
+        if self.started_at and self.finished_at:
+            return (self.finished_at - self.started_at).total_seconds()
         return None
+    
+    @property
+    def is_terminal(self) -> bool:
+        """Check if job is in a terminal state."""
+        return self.status in (
+            JobStatus.SUCCEEDED.value,
+            JobStatus.CANCELLED.value,
+            JobStatus.DEAD_LETTER.value,
+        )

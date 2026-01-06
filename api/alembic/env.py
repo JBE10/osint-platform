@@ -10,6 +10,10 @@ from app.db.base import Base
 from app.models.user import User
 from app.models.workspace import Workspace, WorkspaceMember
 from app.models.audit_log import AuditLog
+from app.models.target import Target
+from app.models.job import Job
+from app.models.raw_evidence import RawEvidence
+from app.models.finding import Finding
 
 config = context.config
 

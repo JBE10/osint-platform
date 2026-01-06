@@ -26,7 +26,7 @@ class TargetCreate(BaseModel):
     target_type: str
     value: str
     label: Optional[str] = None
-    metadata: dict = {}
+    extra_data: dict = {}
 
 
 class EmailTargetCreate(BaseModel):
@@ -59,7 +59,7 @@ class TargetResponse(BaseModel):
     target_type: str
     value: str
     label: Optional[str] = None
-    metadata: dict
+    extra_data: dict
 
     class Config:
         from_attributes = True
@@ -76,7 +76,7 @@ def _create_target(
     target_type: str,
     value: str,
     label: Optional[str],
-    metadata: dict,
+    extra_data: dict,
     request: Request,
 ) -> Target:
     """Create and persist a target."""
@@ -86,7 +86,7 @@ def _create_target(
         target_type=target_type,
         value=value,
         label=label,
-        metadata=metadata,
+        extra_data=extra_data,
     )
     db.add(target)
     db.commit()
@@ -172,7 +172,7 @@ def create_email_target(
         target_type=TargetType.EMAIL.value,
         value=data.email,
         label=data.label,
-        metadata={},
+        extra_data={},
         request=request,
     )
 
@@ -194,7 +194,7 @@ def create_domain_target(
         target_type=TargetType.DOMAIN.value,
         value=data.domain,
         label=data.label,
-        metadata={},
+        extra_data={},
         request=request,
     )
 
@@ -216,7 +216,7 @@ def create_username_target(
         target_type=TargetType.USERNAME.value,
         value=data.username,
         label=data.label,
-        metadata={},
+        extra_data={},
         request=request,
     )
 
@@ -238,7 +238,7 @@ def create_ip_target(
         target_type=TargetType.IP.value,
         value=data.ip,
         label=data.label,
-        metadata={},
+        extra_data={},
         request=request,
     )
 
