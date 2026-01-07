@@ -11,12 +11,13 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.core.deps import CurrentUser, require_analyst, require_viewer
 from app.core.audit import create_audit_log
+from app.core.metrics import jobs_created, jobs_enqueued
 from app.models.workspace import WorkspaceMember
 from app.models.target import Target
 from app.models.job import Job, JobStatus, TechniqueCode, generate_idempotency_key
 from app.models.finding import Finding
 
-router = APIRouter(prefix="/workspaces/{workspace_id}/jobs", tags=["jobs"])
+router = APIRouter(tags=["jobs"])
 
 
 # =============================================================================
@@ -32,10 +33,23 @@ class JobCreate(BaseModel):
     max_attempts: int = 3
 
 
+class JobBatchCreate(BaseModel):
+    """Create multiple jobs for same target with different techniques."""
+    target_id: UUID
+    techniques: list[str]
+    params: dict = {}
+
+
+class JobBatchResponse(BaseModel):
+    """Batch job creation response."""
+    job_ids: list[UUID]
+
+
 class JobResponse(BaseModel):
     """Job response."""
     id: UUID
     workspace_id: UUID
+    investigation_id: Optional[UUID] = None
     target_id: UUID
     technique_code: str
     status: str
@@ -72,10 +86,131 @@ class FindingResponse(BaseModel):
 
 
 # =============================================================================
-# Endpoints
+# V1 Endpoints (with investigation_id support)
 # =============================================================================
 
-@router.post("", response_model=JobResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/v1/workspaces/{workspace_id}/investigations/{investigation_id}/jobs",
+    response_model=JobBatchResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["jobs-v1"],
+)
+def create_jobs_batch(
+    workspace_id: UUID,
+    investigation_id: UUID,
+    data: JobBatchCreate,
+    request: Request,
+    user: CurrentUser,
+    db: Annotated[Session, Depends(get_db)],
+    membership: Annotated[WorkspaceMember, Depends(require_analyst)],
+):
+    """
+    Create multiple jobs for a target. Requires ANALYST role.
+    
+    Request:
+    ```json
+    {
+      "target_id": "uuid",
+      "techniques": ["dns_lookup", "whois_lookup"],
+      "params": {}
+    }
+    ```
+    
+    Response:
+    ```json
+    {
+      "job_ids": ["uuid1", "uuid2"]
+    }
+    ```
+    """
+    # Verify target exists and belongs to workspace
+    target = db.execute(
+        select(Target).where(
+            Target.id == data.target_id,
+            Target.workspace_id == workspace_id,
+        )
+    ).scalar_one_or_none()
+    
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+    
+    job_ids = []
+    
+    for technique in data.techniques:
+        # Validate technique code
+        try:
+            TechniqueCode(technique)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid technique: {technique}. Valid: {[t.value for t in TechniqueCode]}",
+            )
+        
+        # Generate idempotency key
+        idempotency_key = generate_idempotency_key(
+            workspace_id=workspace_id,
+            target_id=data.target_id,
+            technique_code=technique,
+            params=data.params,
+        )
+        
+        # Check for existing job
+        existing = db.execute(
+            select(Job).where(Job.idempotency_key == idempotency_key)
+        ).scalar_one_or_none()
+        
+        if existing:
+            job_ids.append(existing.id)
+            continue
+        
+        # Create new job
+        job = Job(
+            workspace_id=workspace_id,
+            investigation_id=investigation_id,
+            target_id=data.target_id,
+            technique_code=technique,
+            params_json=data.params,
+            idempotency_key=idempotency_key,
+            status=JobStatus.CREATED.value,
+        )
+        db.add(job)
+        db.flush()  # Get the ID
+        job_ids.append(job.id)
+        
+        # Metric
+        jobs_created.labels(workspace_id=str(workspace_id), technique=technique).inc()
+    
+    db.commit()
+    
+    # Audit
+    create_audit_log(
+        db=db,
+        action="jobs.batch_create",
+        resource_type="job",
+        resource_id=None,
+        workspace_id=workspace_id,
+        actor_user_id=user.id,
+        request=request,
+        details={
+            "investigation_id": str(investigation_id),
+            "target_id": str(data.target_id),
+            "techniques": data.techniques,
+            "job_count": len(job_ids),
+        },
+    )
+    
+    return JobBatchResponse(job_ids=job_ids)
+
+
+# =============================================================================
+# Standard Endpoints (workspace level)
+# =============================================================================
+
+@router.post(
+    "/workspaces/{workspace_id}/jobs",
+    response_model=JobResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 def create_job(
     workspace_id: UUID,
     data: JobCreate,
@@ -83,6 +218,7 @@ def create_job(
     user: CurrentUser,
     db: Annotated[Session, Depends(get_db)],
     membership: Annotated[WorkspaceMember, Depends(require_analyst)],
+    investigation_id: Optional[UUID] = Query(None),
 ):
     """
     Create a new job (status=CREATED). Requires ANALYST role.
@@ -133,6 +269,7 @@ def create_job(
     # Create new job (status=CREATED)
     job = Job(
         workspace_id=workspace_id,
+        investigation_id=investigation_id,
         target_id=data.target_id,
         technique_code=data.technique_code,
         params_json=data.params,
@@ -144,6 +281,9 @@ def create_job(
     db.add(job)
     db.commit()
     db.refresh(job)
+    
+    # Metric
+    jobs_created.labels(workspace_id=str(workspace_id), technique=data.technique_code).inc()
     
     # Audit
     create_audit_log(
@@ -160,7 +300,7 @@ def create_job(
     return job
 
 
-@router.get("", response_model=list[JobResponse])
+@router.get("/workspaces/{workspace_id}/jobs", response_model=list[JobResponse])
 def list_jobs(
     workspace_id: UUID,
     user: CurrentUser,
@@ -168,6 +308,7 @@ def list_jobs(
     membership: Annotated[WorkspaceMember, Depends(require_viewer)],
     status_filter: Optional[str] = Query(None, alias="status"),
     target_id: Optional[UUID] = None,
+    investigation_id: Optional[UUID] = None,
     technique_code: Optional[str] = None,
     limit: int = Query(50, le=100),
     offset: int = 0,
@@ -179,6 +320,8 @@ def list_jobs(
         query = query.where(Job.status == status_filter)
     if target_id:
         query = query.where(Job.target_id == target_id)
+    if investigation_id:
+        query = query.where(Job.investigation_id == investigation_id)
     if technique_code:
         query = query.where(Job.technique_code == technique_code)
     
@@ -188,7 +331,7 @@ def list_jobs(
     return jobs
 
 
-@router.get("/{job_id}", response_model=JobResponse)
+@router.get("/workspaces/{workspace_id}/jobs/{job_id}", response_model=JobResponse)
 def get_job(
     workspace_id: UUID,
     job_id: UUID,
@@ -210,7 +353,7 @@ def get_job(
     return job
 
 
-@router.get("/{job_id}/findings", response_model=list[FindingResponse])
+@router.get("/workspaces/{workspace_id}/jobs/{job_id}/findings", response_model=list[FindingResponse])
 def get_job_findings(
     workspace_id: UUID,
     job_id: UUID,
@@ -219,7 +362,6 @@ def get_job_findings(
     membership: Annotated[WorkspaceMember, Depends(require_viewer)],
 ):
     """Get findings for a job. Requires VIEWER role."""
-    # Verify job exists
     job = db.execute(
         select(Job).where(
             Job.id == job_id,
@@ -237,7 +379,7 @@ def get_job_findings(
     return findings
 
 
-@router.post("/{job_id}/enqueue", response_model=JobResponse)
+@router.post("/workspaces/{workspace_id}/jobs/{job_id}/enqueue", response_model=JobResponse)
 def enqueue_job(
     workspace_id: UUID,
     job_id: UUID,
@@ -277,6 +419,9 @@ def enqueue_job(
     db.commit()
     db.refresh(job)
     
+    # Metric
+    jobs_enqueued.labels(workspace_id=str(workspace_id), technique=job.technique_code).inc()
+    
     # Audit
     create_audit_log(
         db=db,
@@ -292,7 +437,7 @@ def enqueue_job(
     return job
 
 
-@router.post("/{job_id}/requeue", response_model=JobResponse)
+@router.post("/workspaces/{workspace_id}/jobs/{job_id}/requeue", response_model=JobResponse)
 def requeue_job(
     workspace_id: UUID,
     job_id: UUID,
@@ -342,6 +487,9 @@ def requeue_job(
     db.commit()
     db.refresh(job)
     
+    # Metric
+    jobs_enqueued.labels(workspace_id=str(workspace_id), technique=job.technique_code).inc()
+    
     # Audit
     create_audit_log(
         db=db,
@@ -357,7 +505,7 @@ def requeue_job(
     return job
 
 
-@router.post("/{job_id}/cancel", response_model=JobResponse)
+@router.post("/workspaces/{workspace_id}/jobs/{job_id}/cancel", response_model=JobResponse)
 def cancel_job(
     workspace_id: UUID,
     job_id: UUID,

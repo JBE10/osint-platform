@@ -14,36 +14,69 @@ from app.db.base import Base
 
 
 class FindingType(str, Enum):
-    """Normalized finding types."""
-    # DNS
-    DOMAIN_DNS_RECORD = "DOMAIN_DNS_RECORD"
-    DOMAIN_NAMESERVER = "DOMAIN_NAMESERVER"
+    """
+    Normalized finding types - STABLE V1 identifiers.
     
-    # WHOIS
-    DOMAIN_REGISTRAR = "DOMAIN_REGISTRAR"
-    DOMAIN_REGISTRATION = "DOMAIN_REGISTRATION"
-    DOMAIN_CONTACT = "DOMAIN_CONTACT"
+    Naming convention: DOMAIN_{SEMANTIC_MEANING}
+    """
+    # ==========================================================================
+    # DNS Lookup Findings (DOMAIN_DNS_LOOKUP)
+    # ==========================================================================
+    DOMAIN_IP_ADDRESS = "DOMAIN_IP_ADDRESS"        # A/AAAA → IP (v4/v6)
+    DOMAIN_NAMESERVER = "DOMAIN_NAMESERVER"        # NS record
+    DOMAIN_CNAME = "DOMAIN_CNAME"                  # Canonical name alias
+    DOMAIN_MAIL_SERVER = "DOMAIN_MAIL_SERVER"      # MX record
+    DOMAIN_SPF_POLICY = "DOMAIN_SPF_POLICY"        # Parsed SPF from TXT
+    DOMAIN_DMARC_POLICY = "DOMAIN_DMARC_POLICY"    # Parsed DMARC from TXT
     
-    # Email
+    # ==========================================================================
+    # WHOIS/RDAP Findings (DOMAIN_WHOIS_RDAP_LOOKUP) - V1
+    # ==========================================================================
+    DOMAIN_REGISTRAR = "DOMAIN_REGISTRAR"          # Registrar name
+    DOMAIN_LIFECYCLE = "DOMAIN_LIFECYCLE"          # created_at, expires_at
+    DOMAIN_STATUS = "DOMAIN_STATUS"                # Domain status flags
+    DOMAIN_WHOIS_NAMESERVERS = "DOMAIN_WHOIS_NAMESERVERS"  # WHOIS nameservers
+    
+    # ==========================================================================
+    # Email Findings (EMAIL_*)
+    # ==========================================================================
     EMAIL_VALID = "EMAIL_VALID"
     EMAIL_DELIVERABLE = "EMAIL_DELIVERABLE"
-    EMAIL_PROVIDER = "EMAIL_PROVIDER"
+    EMAIL_PROVIDER = "EMAIL_PROVIDER"              # Mail provider (google, microsoft, etc)
+    EMAIL_DISPOSABLE = "EMAIL_DISPOSABLE"
+    EMAIL_DOMAIN_CONFIG = "EMAIL_DOMAIN_CONFIG"    # MX/SPF/DMARC analysis
+    EMAIL_SPF_POLICY = "EMAIL_SPF_POLICY"          # SPF policy details
+    EMAIL_DMARC_POLICY = "EMAIL_DMARC_POLICY"      # DMARC policy details
+    EMAIL_BREACH = "EMAIL_BREACH"                  # Breach database hit
     
-    # Network
+    # ==========================================================================
+    # Network Findings (IP_*, PORT_*, SERVICE_*)
+    # ==========================================================================
     IP_GEOLOCATION = "IP_GEOLOCATION"
     IP_ASN = "IP_ASN"
+    IP_REVERSE_DNS = "IP_REVERSE_DNS"
     PORT_OPEN = "PORT_OPEN"
     SERVICE_BANNER = "SERVICE_BANNER"
+    SERVICE_VERSION = "SERVICE_VERSION"
     
-    # Social
+    # ==========================================================================
+    # Social Findings (SOCIAL_*, USERNAME_*)
+    # ==========================================================================
     SOCIAL_PROFILE = "SOCIAL_PROFILE"
     USERNAME_FOUND = "USERNAME_FOUND"
+    USERNAME_IDENTITY = "USERNAME_IDENTITY"    # Profile existence/data on platform
+    USERNAME_ACTIVITY = "USERNAME_ACTIVITY"    # Activity metrics (repos, karma, etc)
     
-    # Security
-    BREACH_ENTRY = "BREACH_ENTRY"
-    CREDENTIAL_LEAK = "CREDENTIAL_LEAK"
+    # ==========================================================================
+    # Security Findings (SECURITY_*)
+    # ==========================================================================
+    SECURITY_BREACH = "SECURITY_BREACH"
+    SECURITY_LEAK = "SECURITY_LEAK"
+    SECURITY_VULNERABILITY = "SECURITY_VULNERABILITY"
     
-    # Generic
+    # ==========================================================================
+    # Generic (for testing/custom)
+    # ==========================================================================
     RAW_DATA = "RAW_DATA"
 
 
@@ -58,8 +91,9 @@ def generate_finding_fingerprint(
     
     Same (workspace, type, subject, stable_data) = same finding = upsert.
     """
-    # Extract stable fields from data (exclude timestamps, etc.)
-    stable_data = {k: v for k, v in data.items() if k not in ("timestamp", "ttl", "cached_at")}
+    # Extract stable fields from data (exclude timestamps, TTLs, etc.)
+    volatile_keys = ("timestamp", "ttl", "cached_at", "query_time_ms", "last_checked")
+    stable_data = {k: v for k, v in data.items() if k not in volatile_keys}
     data_str = json.dumps(stable_data, sort_keys=True, separators=(',', ':'), default=str)
     
     composite = f"{workspace_id}{finding_type}{subject}{data_str}"
@@ -78,12 +112,11 @@ class Finding(Base):
     
     V1 Schema (minimum):
     {
-      "finding_type": "DOMAIN_DNS_RECORD",
+      "finding_type": "DOMAIN_DNS_A",
       "subject": "example.com",
-      "confidence": 90,
+      "confidence": 95,
       "data": {
-        "record_type": "MX",
-        "value": "mail.example.com",
+        "ip": "93.184.216.34",
         "ttl": 3600
       }
     }
@@ -160,4 +193,3 @@ class Finding(Base):
             data_json=data,
             finding_fingerprint=fingerprint,
         )
-

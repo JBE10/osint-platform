@@ -30,7 +30,7 @@ def send_job_to_celery(job: Job) -> str:
     result = celery_app.send_task(
         "worker_app.tasks.execute_job",
         kwargs={"job_id": str(job.id)},
-        queue="default",
+        queue="celery",  # Default Celery queue
         priority=job.priority,  # Celery priority (lower = higher)
     )
     

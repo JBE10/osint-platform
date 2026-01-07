@@ -33,15 +33,72 @@ class JobStatus(str, Enum):
 
 
 class TechniqueCode(str, Enum):
-    """OSINT technique codes."""
-    DNS_LOOKUP = "dns_lookup"
-    WHOIS_LOOKUP = "whois_lookup"
-    EMAIL_VERIFY = "email_verify"
-    SUBDOMAIN_ENUM = "subdomain_enum"
-    PORT_SCAN = "port_scan"
-    SCREENSHOT = "screenshot"
-    SOCIAL_LOOKUP = "social_lookup"
-    BREACH_CHECK = "breach_check"
+    """
+    OSINT technique codes.
+    
+    Naming: {category}_{action}
+    Each technique produces specific FindingTypes.
+    """
+    # ==========================================================================
+    # Testing
+    # ==========================================================================
+    NOOP_LOOKUP = "noop_lookup"  # Dummy technique for testing
+    
+    # ==========================================================================
+    # Domain Techniques (Tier 1 - Recommended)
+    # ==========================================================================
+    # DNS lookup: A/AAAA/CNAME/NS/MX/TXT + SPF/DMARC parsing
+    DOMAIN_DNS_LOOKUP = "domain_dns_lookup"
+    
+    # WHOIS/RDAP lookup: registrar, dates, status, nameservers
+    DOMAIN_WHOIS_RDAP_LOOKUP = "domain_whois_rdap_lookup"
+    
+    # ==========================================================================
+    # Domain Techniques (Tier 2 - Future)
+    # ==========================================================================
+    SUBDOMAIN_ENUM = "subdomain_enum"        # Subdomain enumeration
+    CERTIFICATE_TRANSPARENCY = "cert_transparency"  # CT log search
+    
+    # ==========================================================================
+    # Email Techniques (Tier 1)
+    # ==========================================================================
+    EMAIL_MX_SPF_DMARC = "email_mx_spf_dmarc"        # Passive domain analysis
+    EMAIL_BREACH_LOOKUP = "email_breach_lookup"      # Breach database check
+    
+    # Email Techniques (Legacy)
+    EMAIL_VERIFY = "email_verify"            # Deprecated - use EMAIL_MX_SPF_DMARC
+    
+    # ==========================================================================
+    # Network Techniques
+    # ==========================================================================
+    PORT_SCAN = "port_scan"                  # TCP port scan
+    
+    # ==========================================================================
+    # Web Techniques
+    # ==========================================================================
+    SCREENSHOT = "screenshot"                # Web page screenshot
+    
+    # ==========================================================================
+    # Username Techniques (Tier 1)
+    # ==========================================================================
+    USERNAME_GITHUB_LOOKUP = "username_github_lookup"    # GitHub profile lookup
+    USERNAME_REDDIT_LOOKUP = "username_reddit_lookup"    # Reddit profile lookup
+    
+    # ==========================================================================
+    # Social Techniques (Legacy)
+    # ==========================================================================
+    SOCIAL_LOOKUP = "social_lookup"          # Generic social media search
+    
+    # ==========================================================================
+    # Security Techniques
+    # ==========================================================================
+    BREACH_CHECK = "breach_check"            # Breach database check
+    
+    # ==========================================================================
+    # Legacy (deprecated, kept for compatibility)
+    # ==========================================================================
+    DNS_LOOKUP = "dns_lookup"                # Use DOMAIN_DNS_LOOKUP
+    WHOIS_LOOKUP = "whois_lookup"            # Use DOMAIN_WHOIS_RDAP_LOOKUP
 
 
 # Valid state transitions
