@@ -101,6 +101,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     - Per-IP limits for anonymous requests
     - Different limits: auth (5/min) < mutate (30/min) < read (120/min)
     - Standard headers: X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After
+    - Test bypass via X-Test-Bypass-RateLimit header (only in local/test env)
     """
     
     # Paths to skip rate limiting
@@ -118,6 +119,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         # Skip health and docs endpoints
         if request.url.path in self.SKIP_PATHS:
+            return await call_next(request)
+        
+        # Allow bypass in test/local environment
+        if settings.ENV in ("local", "test") and request.headers.get("X-Test-Bypass-RateLimit"):
             return await call_next(request)
         
         # Extract user_id from JWT (if authenticated)

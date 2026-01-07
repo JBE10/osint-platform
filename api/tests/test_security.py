@@ -144,7 +144,10 @@ class TestJWTSecurity:
         
         response = client.get(
             "/v1/auth/me",
-            headers={"Authorization": f"Bearer {tampered}"},
+            headers={
+                "Authorization": f"Bearer {tampered}",
+                "X-Test-Bypass-RateLimit": "1",
+            },
         )
         assert response.status_code == 401
     
@@ -166,7 +169,10 @@ class TestJWTSecurity:
         
         response = client.get(
             "/v1/auth/me",
-            headers={"Authorization": f"Bearer {expired_token}"},
+            headers={
+                "Authorization": f"Bearer {expired_token}",
+                "X-Test-Bypass-RateLimit": "1",
+            },
         )
         assert response.status_code == 401
     
@@ -180,7 +186,10 @@ class TestJWTSecurity:
         
         response = client.get(
             "/v1/auth/me",
-            headers={"Authorization": f"Bearer {wrong_algo_token}"},
+            headers={
+                "Authorization": f"Bearer {wrong_algo_token}",
+                "X-Test-Bypass-RateLimit": "1",
+            },
         )
         assert response.status_code == 401
 

@@ -115,7 +115,10 @@ def test_workspace(db: Session, test_user: User) -> Workspace:
 def auth_headers(test_user: User) -> dict:
     """Get auth headers for test user."""
     token = create_access_token(user_id=test_user.id, email=test_user.email)
-    return {"Authorization": f"Bearer {token}"}
+    return {
+        "Authorization": f"Bearer {token}",
+        "X-Test-Bypass-RateLimit": "1",  # Bypass rate limiting in tests
+    }
 
 
 @pytest.fixture
@@ -140,7 +143,10 @@ def viewer_user(db: Session, test_workspace: Workspace) -> tuple[User, dict]:
     db.commit()
     
     token = create_access_token(user_id=user.id, email=user.email)
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Test-Bypass-RateLimit": "1",
+    }
     
     return user, headers
 
@@ -167,6 +173,9 @@ def analyst_user(db: Session, test_workspace: Workspace) -> tuple[User, dict]:
     db.commit()
     
     token = create_access_token(user_id=user.id, email=user.email)
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Test-Bypass-RateLimit": "1",
+    }
     
     return user, headers

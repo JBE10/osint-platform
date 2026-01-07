@@ -18,13 +18,14 @@ class TestTechniqueAllowlist:
     """Technique allowlist enforcement tests."""
     
     @pytest.fixture
-    def target_id(self, client: TestClient, db, test_workspace, auth_headers):
+    def target_id(self, client: TestClient, db, test_workspace, test_user, auth_headers):
         """Create a target for testing."""
         from app.models.target import Target, TargetType
         
         target = Target(
             id=uuid4(),
             workspace_id=test_workspace.id,
+            created_by=test_user.id,
             target_type=TargetType.DOMAIN.value,
             value=f"allowlist-test-{uuid4()}.com",
         )

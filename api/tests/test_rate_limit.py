@@ -17,9 +17,15 @@ from unittest.mock import patch, MagicMock
 class TestRateLimitBasic:
     """Basic rate limit tests."""
     
-    def test_rate_limit_headers_present(self, client: TestClient, auth_headers):
-        """Rate limit headers should be present in response."""
-        response = client.get("/v1/workspaces", headers=auth_headers)
+    def test_rate_limit_headers_present(self, client: TestClient, test_user):
+        """Rate limit headers should be present in response (without bypass)."""
+        from app.core.security import create_access_token
+        
+        # Create headers WITHOUT bypass to test rate limit headers
+        token = create_access_token(user_id=test_user.id, email=test_user.email)
+        headers = {"Authorization": f"Bearer {token}"}
+        
+        response = client.get("/v1/workspaces", headers=headers)
         
         assert "X-RateLimit-Limit" in response.headers
         assert "X-RateLimit-Remaining" in response.headers

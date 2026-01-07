@@ -157,9 +157,9 @@ class AuditMiddleware(BaseHTTPMiddleware):
         # Determine success
         is_success = 200 <= response.status_code < 400
         
-        # Build log entry
+        # Build log entry (no 'event' key - structlog uses first arg as event)
         log_entry = {
-            "event": "audit",
+            "audit_type": "request",
             "action": action,
             "success": is_success,
             "status_code": response.status_code,
@@ -167,7 +167,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
             **audit_context,
         }
         
-        # Log using structlog
+        # Log using structlog (first arg is event name, rest are kwargs)
         if is_success:
             logger.info("audit.action", **log_entry)
         else:
