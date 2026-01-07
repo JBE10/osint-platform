@@ -150,14 +150,19 @@ class TestJWTSecurity:
     
     def test_expired_jwt_rejected(self, client, test_user):
         """Expired JWT should be rejected."""
-        from app.core.security import create_access_token
-        from datetime import timedelta
+        import jwt
+        from datetime import datetime, timezone, timedelta
+        from app.core.config import settings
         
         # Create token that's already expired
-        expired_token = create_access_token(
-            data={"sub": str(test_user.id)},
-            expires_delta=timedelta(seconds=-1),  # Already expired
-        )
+        now = datetime.now(timezone.utc)
+        payload = {
+            "sub": str(test_user.id),
+            "email": test_user.email,
+            "iat": now - timedelta(hours=1),
+            "exp": now - timedelta(seconds=1),  # Already expired
+        }
+        expired_token = jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm="HS256")
         
         response = client.get(
             "/v1/auth/me",

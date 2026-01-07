@@ -6,19 +6,21 @@ import pytest
 from typing import Generator
 from uuid import uuid4
 
+# Set test environment BEFORE importing app
+os.environ.setdefault("ENV", "local")
+os.environ.setdefault("DATABASE_URL", "postgresql+psycopg://osint:osint@localhost:5432/osint")
+os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-testing-only-32chars")
+
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
-
-# Set test environment
-os.environ["ENV"] = "local"
-os.environ["JWT_SECRET_KEY"] = "test-secret-key-for-testing-only-32chars"
 
 from app.main import app
 from app.db.base import Base
 from app.db.session import get_db
 from app.models.user import User
-from app.models.workspace import Workspace, WorkspaceMember, WorkspaceRole
+from app.models.workspace import Workspace, WorkspaceMember
 from app.core.security import hash_password, create_access_token
 
 
@@ -26,10 +28,7 @@ from app.core.security import hash_password, create_access_token
 # Database Setup
 # =============================================================================
 
-TEST_DATABASE_URL = os.getenv(
-    "TEST_DATABASE_URL", 
-    "postgresql+psycopg://osint:osint@localhost:5432/osint_test"
-)
+TEST_DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://osint:osint@localhost:5432/osint")
 
 engine = create_engine(TEST_DATABASE_URL)
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -56,8 +55,6 @@ def setup_database():
     """Create tables once per test session."""
     Base.metadata.create_all(bind=engine)
     yield
-    # Optionally drop tables after tests
-    # Base.metadata.drop_all(bind=engine)
 
 
 @pytest.fixture
@@ -84,7 +81,6 @@ def test_user(db: Session) -> User:
         id=uuid4(),
         email=f"test-{uuid4()}@example.com",
         password_hash=hash_password("TestPassword123!"),
-        name="Test User",
         is_active=True,
     )
     db.add(user)
@@ -99,16 +95,15 @@ def test_workspace(db: Session, test_user: User) -> Workspace:
     workspace = Workspace(
         id=uuid4(),
         name=f"Test Workspace {uuid4()}",
-        owner_id=test_user.id,
     )
     db.add(workspace)
     db.flush()
     
-    # Add owner as member
+    # Add test_user as OWNER
     member = WorkspaceMember(
         workspace_id=workspace.id,
         user_id=test_user.id,
-        role=WorkspaceRole.OWNER.value,
+        role="OWNER",
     )
     db.add(member)
     db.commit()
@@ -119,7 +114,7 @@ def test_workspace(db: Session, test_user: User) -> Workspace:
 @pytest.fixture
 def auth_headers(test_user: User) -> dict:
     """Get auth headers for test user."""
-    token = create_access_token(data={"sub": str(test_user.id)})
+    token = create_access_token(user_id=test_user.id, email=test_user.email)
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -130,7 +125,6 @@ def viewer_user(db: Session, test_workspace: Workspace) -> tuple[User, dict]:
         id=uuid4(),
         email=f"viewer-{uuid4()}@example.com",
         password_hash=hash_password("ViewerPassword123!"),
-        name="Viewer User",
         is_active=True,
     )
     db.add(user)
@@ -140,12 +134,12 @@ def viewer_user(db: Session, test_workspace: Workspace) -> tuple[User, dict]:
     member = WorkspaceMember(
         workspace_id=test_workspace.id,
         user_id=user.id,
-        role=WorkspaceRole.VIEWER.value,
+        role="VIEWER",
     )
     db.add(member)
     db.commit()
     
-    token = create_access_token(data={"sub": str(user.id)})
+    token = create_access_token(user_id=user.id, email=user.email)
     headers = {"Authorization": f"Bearer {token}"}
     
     return user, headers
@@ -158,7 +152,6 @@ def analyst_user(db: Session, test_workspace: Workspace) -> tuple[User, dict]:
         id=uuid4(),
         email=f"analyst-{uuid4()}@example.com",
         password_hash=hash_password("AnalystPassword123!"),
-        name="Analyst User",
         is_active=True,
     )
     db.add(user)
@@ -168,13 +161,12 @@ def analyst_user(db: Session, test_workspace: Workspace) -> tuple[User, dict]:
     member = WorkspaceMember(
         workspace_id=test_workspace.id,
         user_id=user.id,
-        role=WorkspaceRole.ANALYST.value,
+        role="ANALYST",
     )
     db.add(member)
     db.commit()
     
-    token = create_access_token(data={"sub": str(user.id)})
+    token = create_access_token(user_id=user.id, email=user.email)
     headers = {"Authorization": f"Bearer {token}"}
     
     return user, headers
-
