@@ -42,12 +42,15 @@ class FindingType(str, Enum):
     # ==========================================================================
     EMAIL_VALID = "EMAIL_VALID"
     EMAIL_DELIVERABLE = "EMAIL_DELIVERABLE"
-    EMAIL_PROVIDER = "EMAIL_PROVIDER"              # Mail provider (google, microsoft, etc)
+    EMAIL_PROVIDER = "EMAIL_PROVIDER"                          # Mail provider detection
     EMAIL_DISPOSABLE = "EMAIL_DISPOSABLE"
-    EMAIL_DOMAIN_CONFIG = "EMAIL_DOMAIN_CONFIG"    # MX/SPF/DMARC analysis
-    EMAIL_SPF_POLICY = "EMAIL_SPF_POLICY"          # SPF policy details
-    EMAIL_DMARC_POLICY = "EMAIL_DMARC_POLICY"      # DMARC policy details
-    EMAIL_BREACH = "EMAIL_BREACH"                  # Breach database hit
+    EMAIL_MAIL_INFRASTRUCTURE = "EMAIL_MAIL_INFRASTRUCTURE"    # MX hosts from domain
+    EMAIL_SPF_POLICY = "EMAIL_SPF_POLICY"                      # SPF policy (mode, includes)
+    EMAIL_DMARC_POLICY = "EMAIL_DMARC_POLICY"                  # DMARC policy (p, rua)
+    EMAIL_BREACH_STATUS = "EMAIL_BREACH_STATUS"                # Breach check result
+    # Legacy (deprecated)
+    EMAIL_DOMAIN_CONFIG = "EMAIL_DOMAIN_CONFIG"
+    EMAIL_BREACH = "EMAIL_BREACH"
     
     # ==========================================================================
     # Network Findings (IP_*, PORT_*, SERVICE_*)

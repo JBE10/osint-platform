@@ -223,6 +223,142 @@ BLOCKED_TLDS = {
 }
 
 
+# =============================================================================
+# Email Validation (canonicalization, length, domain)
+# =============================================================================
+
+# RFC 5321 limits
+MAX_EMAIL_LENGTH = 254
+MAX_LOCAL_PART_LENGTH = 64
+
+# Email pattern (simplified RFC 5322)
+EMAIL_PATTERN = re.compile(
+    r"^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"
+)
+
+# Disposable email domains (common ones for blocking)
+DISPOSABLE_EMAIL_DOMAINS = {
+    "mailinator.com",
+    "guerrillamail.com",
+    "tempmail.com",
+    "throwaway.email",
+    "10minutemail.com",
+    "fakeinbox.com",
+    "trashmail.com",
+    "getnada.com",
+    "temp-mail.org",
+}
+
+# Blocked email domains (internal/reserved)
+BLOCKED_EMAIL_DOMAINS = {
+    "localhost",
+    "example.com",
+    "example.org",
+    "example.net",
+    "test.com",
+    "invalid.com",
+}
+
+
+def canonicalize_email(email: str) -> str:
+    """
+    Canonicalize email address for consistent processing.
+    
+    - Lowercase
+    - Strip whitespace
+    - Remove dots from Gmail local part (optional, configurable)
+    - Handle plus addressing (keep for now, but normalize)
+    """
+    email = email.lower().strip()
+    
+    if "@" not in email:
+        return email
+    
+    local, domain = email.rsplit("@", 1)
+    
+    # Gmail dot normalization (optional - disabled by default for privacy)
+    # if domain in ("gmail.com", "googlemail.com"):
+    #     local = local.replace(".", "")
+    
+    return f"{local}@{domain}"
+
+
+def validate_email_for_osint(email: str) -> dict:
+    """
+    Validate an email address for OSINT operations.
+    
+    Checks:
+    - Format (RFC 5322 simplified)
+    - Length (RFC 5321 limits)
+    - Domain validity (not blocked, not disposable)
+    - Canonicalization
+    
+    Returns validation result with security metadata.
+    """
+    result = {
+        "email": email,
+        "canonical": None,
+        "valid": False,
+        "blocked": False,
+        "disposable": False,
+        "reason": None,
+        "domain": None,
+    }
+    
+    # Canonicalize
+    canonical = canonicalize_email(email)
+    result["canonical"] = canonical
+    
+    # Length check
+    if len(canonical) > MAX_EMAIL_LENGTH:
+        result["reason"] = "EMAIL_TOO_LONG"
+        return result
+    
+    # Format check
+    if not EMAIL_PATTERN.match(canonical):
+        result["reason"] = "INVALID_EMAIL_FORMAT"
+        return result
+    
+    # Extract parts
+    if "@" not in canonical:
+        result["reason"] = "MISSING_AT_SYMBOL"
+        return result
+    
+    local, domain = canonical.rsplit("@", 1)
+    result["domain"] = domain
+    
+    # Local part length
+    if len(local) > MAX_LOCAL_PART_LENGTH:
+        result["reason"] = "LOCAL_PART_TOO_LONG"
+        return result
+    
+    # Empty local part
+    if not local:
+        result["reason"] = "EMPTY_LOCAL_PART"
+        return result
+    
+    # Domain validation (reuse domain validator)
+    domain_check = validate_domain_for_osint(domain)
+    if not domain_check["valid"]:
+        result["blocked"] = domain_check.get("blocked", False)
+        result["reason"] = f"INVALID_DOMAIN: {domain_check['reason']}"
+        return result
+    
+    # Check blocked domains
+    if domain in BLOCKED_EMAIL_DOMAINS:
+        result["blocked"] = True
+        result["reason"] = f"BLOCKED_EMAIL_DOMAIN_{domain.upper()}"
+        return result
+    
+    # Check disposable domains (warning, not blocking)
+    if domain in DISPOSABLE_EMAIL_DOMAINS:
+        result["disposable"] = True
+        logger.warning("Disposable email domain detected", domain=domain)
+    
+    result["valid"] = True
+    return result
+
+
 def validate_domain_for_osint(domain: str) -> dict:
     """
     Validate a domain for OSINT operations.

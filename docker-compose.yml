@@ -58,12 +58,16 @@ services:
   api:
     build: ./api
     environment:
+      # SECURITY: Set ENV=prod in production with real secrets
+      ENV: dev
+      DEBUG: "false"
       DATABASE_URL: postgresql+psycopg://osint:osint@postgres:5432/osint
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: minio
       MINIO_SECRET_KEY: minio123456
       MINIO_BUCKET: evidence
+      # JWT_SECRET_KEY: "set-in-production-openssl-rand-hex-32"
     ports:
       - "8000:8000"
     depends_on:

@@ -1,3 +1,19 @@
+"""
+Atomic rate limiting using Redis INCR/EXPIRE.
+
+Contract:
+- Key: rate:{bucket}:{principal}:{route_group}
+- Bucket: minute timestamp (floor to minute)
+- Principal: user_id or IP
+- Route group: auth | read | mutate
+
+Operation (atomic per Redis):
+1. count = INCR key
+2. if count == 1 then EXPIRE key 60
+3. if count > limit → 429
+
+This eliminates race conditions without Lua complexity.
+"""
 import time
 from fastapi import Request, Response, status
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -7,16 +23,25 @@ from app.core.redis import redis_client
 from app.core.config import settings
 
 
+def get_bucket() -> int:
+    """Get current minute bucket (epoch // 60)."""
+    return int(time.time()) // 60
+
+
 def get_rate_limit_key(request: Request, user_id: str | None) -> tuple[str, int]:
     """
-    Get rate limit key and limit based on request.
+    Build rate limit key and get limit.
+    
+    Key format: rate:{bucket}:{principal}:{group}
+    
     Returns (key, limit_per_minute).
     """
-    path = request.url.path
+    bucket = get_bucket()
     ip = request.client.host if request.client else "unknown"
+    path = request.url.path
     
-    # Determine endpoint group and limit
-    if path.startswith("/auth"):
+    # Determine route group and limit
+    if "/auth" in path:
         group = "auth"
         limit = settings.RATE_LIMIT_AUTH
     elif request.method in ("POST", "PUT", "DELETE", "PATCH"):
@@ -26,70 +51,115 @@ def get_rate_limit_key(request: Request, user_id: str | None) -> tuple[str, int]
         group = "read"
         limit = settings.RATE_LIMIT_READ
     
-    # Build key: prefer user_id, fallback to IP
-    if user_id:
-        key = f"rate:{user_id}:{group}"
-    else:
-        key = f"rate:ip:{ip}:{group}"
+    # Principal: prefer user_id, fallback to IP
+    principal = user_id if user_id else f"ip:{ip}"
     
+    key = f"rate:{bucket}:{principal}:{group}"
     return key, limit
 
 
-def check_rate_limit(key: str, limit: int, window: int = 60) -> tuple[bool, int, int]:
+def check_rate_limit_atomic(key: str, limit: int, window: int = 60) -> tuple[bool, int, int]:
     """
-    Check rate limit using Redis sliding window.
-    Returns (allowed, remaining, retry_after).
+    Check rate limit using atomic INCR/EXPIRE.
+    
+    Returns (allowed, remaining, retry_after_seconds).
+    
+    Contract:
+    1. count = INCR key (atomic)
+    2. if count == 1 → EXPIRE key window (first request in window)
+    3. if count > limit → denied
     """
     try:
-        current = redis_client.get(key)
+        # INCR is atomic - returns value after increment
+        count = redis_client.incr(key)
         
-        if current is None:
-            redis_client.setex(key, window, 1)
-            return True, limit - 1, 0
+        # First request in this window - set expiry
+        if count == 1:
+            redis_client.expire(key, window)
         
-        count = int(current)
-        if count >= limit:
+        # Check limit
+        if count > limit:
             ttl = redis_client.ttl(key)
-            return False, 0, ttl if ttl > 0 else window
+            retry_after = ttl if ttl > 0 else window
+            return False, 0, retry_after
         
-        redis_client.incr(key)
-        return True, limit - count - 1, 0
+        remaining = limit - count
+        return True, remaining, 0
         
     except Exception:
-        # If Redis fails, allow the request
+        # If Redis fails, allow the request (fail open)
         return True, limit, 0
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Rate limiting middleware using Redis."""
+    """
+    Rate limiting middleware using atomic Redis INCR/EXPIRE.
+    
+    Features:
+    - Atomic counter (no race conditions)
+    - Per-user limits for authenticated requests
+    - Per-IP limits for anonymous requests
+    - Different limits: auth (5/min) < mutate (30/min) < read (120/min)
+    - Standard headers: X-RateLimit-Limit, X-RateLimit-Remaining, Retry-After
+    """
+    
+    # Paths to skip rate limiting
+    SKIP_PATHS = frozenset([
+        "/",
+        "/v1",
+        "/healthz",
+        "/readyz",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/metrics",
+    ])
     
     async def dispatch(self, request: Request, call_next) -> Response:
-        # Skip health endpoints
-        if request.url.path in ("/healthz", "/readyz", "/", "/docs", "/openapi.json"):
+        # Skip health and docs endpoints
+        if request.url.path in self.SKIP_PATHS:
             return await call_next(request)
         
-        # Try to get user_id from token (if present)
-        user_id = None
-        auth_header = request.headers.get("Authorization")
-        if auth_header and auth_header.startswith("Bearer "):
-            from app.core.security import decode_access_token
-            token = auth_header.split(" ")[1]
-            payload = decode_access_token(token)
-            if payload:
-                user_id = payload.get("sub")
+        # Extract user_id from JWT (if authenticated)
+        user_id = self._extract_user_id(request)
         
+        # Check rate limit
         key, limit = get_rate_limit_key(request, user_id)
-        allowed, remaining, retry_after = check_rate_limit(key, limit)
+        allowed, remaining, retry_after = check_rate_limit_atomic(key, limit)
         
         if not allowed:
             return JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                content={"detail": "Too many requests"},
-                headers={"Retry-After": str(retry_after)},
+                content={
+                    "detail": "Rate limit exceeded",
+                    "retry_after": retry_after,
+                },
+                headers={
+                    "Retry-After": str(retry_after),
+                    "X-RateLimit-Limit": str(limit),
+                    "X-RateLimit-Remaining": "0",
+                },
             )
         
+        # Process request
         response = await call_next(request)
+        
+        # Add rate limit headers
         response.headers["X-RateLimit-Limit"] = str(limit)
-        response.headers["X-RateLimit-Remaining"] = str(remaining)
+        response.headers["X-RateLimit-Remaining"] = str(max(0, remaining))
         
         return response
+    
+    def _extract_user_id(self, request: Request) -> str | None:
+        """Extract user_id from JWT token if present."""
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return None
+        
+        try:
+            from app.core.security import decode_access_token
+            token = auth_header.split(" ")[1]
+            payload = decode_access_token(token)
+            return payload.get("sub") if payload else None
+        except Exception:
+            return None

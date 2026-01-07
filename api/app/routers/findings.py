@@ -183,3 +183,115 @@ def get_finding(
     
     return finding
 
+
+# =============================================================================
+# Export Endpoint
+# =============================================================================
+
+class ExportResponse(BaseModel):
+    """Structured export for auditing."""
+    export_version: str = "1.0"
+    exported_at: datetime
+    workspace_id: UUID
+    filters: dict
+    total_findings: int
+    findings: list[FindingResponse]
+    summary: dict
+
+
+@router.get("/export/json")
+def export_findings_json(
+    workspace_id: UUID,
+    user: CurrentUser,
+    db: Annotated[Session, Depends(get_db)],
+    membership: Annotated[WorkspaceMember, Depends(require_viewer)],
+    target_id: Optional[UUID] = None,
+    finding_type: Optional[str] = None,
+    subject: Optional[str] = None,
+    min_confidence: int = Query(0, ge=0, le=100),
+):
+    """
+    Export findings as structured JSON for auditing.
+    
+    Returns a complete, auditable export including:
+    - Export metadata (version, timestamp)
+    - Applied filters
+    - All matching findings
+    - Summary statistics
+    
+    Requires VIEWER role.
+    """
+    from datetime import timezone
+    
+    # Build query
+    query = select(Finding).where(
+        Finding.workspace_id == workspace_id,
+        Finding.confidence >= min_confidence,
+    )
+    
+    filters = {"min_confidence": min_confidence}
+    
+    if target_id:
+        query = query.where(Finding.target_id == target_id)
+        filters["target_id"] = str(target_id)
+    if finding_type:
+        query = query.where(Finding.finding_type == finding_type)
+        filters["finding_type"] = finding_type
+    if subject:
+        query = query.where(Finding.subject == subject)
+        filters["subject"] = subject
+    
+    query = query.order_by(Finding.finding_type, Finding.subject, Finding.last_seen_at.desc())
+    
+    findings = db.execute(query).scalars().all()
+    
+    # Build summary
+    summary = {
+        "by_type": {},
+        "by_subject": {},
+        "confidence_distribution": {"high": 0, "medium": 0, "low": 0},
+        "unique_subjects": set(),
+    }
+    
+    for f in findings:
+        # By type
+        summary["by_type"][f.finding_type] = summary["by_type"].get(f.finding_type, 0) + 1
+        
+        # By subject
+        summary["by_subject"][f.subject] = summary["by_subject"].get(f.subject, 0) + 1
+        summary["unique_subjects"].add(f.subject)
+        
+        # Confidence distribution
+        if f.confidence >= 80:
+            summary["confidence_distribution"]["high"] += 1
+        elif f.confidence >= 50:
+            summary["confidence_distribution"]["medium"] += 1
+        else:
+            summary["confidence_distribution"]["low"] += 1
+    
+    summary["unique_subjects"] = len(summary["unique_subjects"])
+    
+    return {
+        "export_version": "1.0",
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "exported_by": str(user.id),
+        "workspace_id": str(workspace_id),
+        "filters": filters,
+        "total_findings": len(findings),
+        "findings": [
+            {
+                "id": str(f.id),
+                "finding_type": f.finding_type,
+                "subject": f.subject,
+                "confidence": f.confidence,
+                "data": f.data_json,
+                "first_seen_at": f.first_seen_at.isoformat() if f.first_seen_at else None,
+                "last_seen_at": f.last_seen_at.isoformat() if f.last_seen_at else None,
+                "target_id": str(f.target_id),
+                "job_id": str(f.job_id),
+            }
+            for f in findings
+        ],
+        "summary": summary,
+    }
+

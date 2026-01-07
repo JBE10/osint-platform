@@ -62,11 +62,11 @@ class TechniqueCode(str, Enum):
     # ==========================================================================
     # Email Techniques (Tier 1)
     # ==========================================================================
-    EMAIL_MX_SPF_DMARC = "email_mx_spf_dmarc"        # Passive domain analysis
+    EMAIL_MX_SPF_DMARC_CORRELATION = "email_mx_spf_dmarc_correlation"  # Passive domain analysis
     EMAIL_BREACH_LOOKUP = "email_breach_lookup"      # Breach database check
     
     # Email Techniques (Legacy)
-    EMAIL_VERIFY = "email_verify"            # Deprecated - use EMAIL_MX_SPF_DMARC
+    EMAIL_VERIFY = "email_verify"  # Deprecated - use EMAIL_MX_SPF_DMARC_CORRELATION
     
     # ==========================================================================
     # Network Techniques

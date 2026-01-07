@@ -90,6 +90,10 @@ class OutboundRateLimiter:
         "username_github_lookup": (1, 1),   # 60/hour = 1/min (without token)
         "username_reddit_lookup": (20, 2),  # ~1 req per 3s = 20/min, burst 2
         
+        # Email techniques
+        "email_mx_spf_dmarc_correlation": (30, 5),  # DNS-based, generous limit
+        "email_breach_lookup": (1, 1),      # HIBP: 1 req per 1.5s with key
+        
         # Other techniques
         "email_verify": (20, 3),
         "port_scan": (5, 1),                 # Very limited
@@ -138,6 +142,10 @@ DOMAIN_THROTTLE = {
     # Username techniques (avoid hammering same username)
     "username_github_lookup": 300,    # 5 min between same username lookups
     "username_reddit_lookup": 180,    # 3 min between same username lookups
+    
+    # Email techniques
+    "email_mx_spf_dmarc_correlation": 60,  # 1 min between same domain
+    "email_breach_lookup": 600,       # 10 min between same email
     
     "default": 5,
 }
@@ -1172,6 +1180,234 @@ def execute_username_reddit_lookup(job: dict) -> list[dict]:
 
 
 # =============================================================================
+# TECHNIQUE: EMAIL_MX_SPF_DMARC (Passive Domain Analysis)
+# =============================================================================
+
+def execute_email_mx_spf_dmarc(job: dict) -> list[dict]:
+    """
+    V1 EMAIL_MX_SPF_DMARC_CORRELATION - Passive email domain analysis.
+    
+    Reuses DOMAIN_DNS_LOOKUP internally (no duplicate logic).
+    Extracts domain from email and queries MX, SPF, DMARC.
+    
+    NO SMTP connection, NO mailbox probing.
+    
+    Produces FindingTypes (per design spec):
+    - EMAIL_MAIL_INFRASTRUCTURE (MX hosts from domain)
+    - EMAIL_SPF_POLICY (mode, policy)
+    - EMAIL_DMARC_POLICY (policy, rua)
+    """
+    from worker_app.email_providers import analyze_email_domain
+    import hashlib
+    
+    from worker_app.security import validate_email_for_osint
+    
+    email = job["target_value"]
+    params = job.get("params_json", {}) or {}
+    
+    # Full email validation (canonicalization, length, domain)
+    email_validation = validate_email_for_osint(email)
+    if not email_validation["valid"]:
+        raise ValueError(f"Invalid email: {email_validation['reason']}")
+    
+    # Use canonical form
+    email = email_validation["canonical"]
+    domain = email_validation["domain"]
+    
+    # Rate limit per domain (not per email - avoids enumeration)
+    rate_limited_request("email_mx_spf_dmarc_correlation", domain=domain)
+    
+    # Security: Log with hashed email, not plaintext
+    email_hash = hashlib.sha256(email.lower().encode()).hexdigest()[:16]
+    logger.info("EMAIL_MX_SPF_DMARC starting", job_id=job["id"], email_hash=email_hash, domain=domain, disposable=email_validation.get("disposable", False))
+    
+    timeout = params.get("timeout", 5)
+    
+    # Execute passive analysis (reuses DNS lookup logic)
+    result = analyze_email_domain(email, timeout=timeout)
+    
+    # Raw Evidence (per design spec format)
+    raw_evidence = {
+        "email": email,
+        "domain": domain,
+        "mx": result.get("mx_records", []),
+        "spf": result.get("spf_record", {}).get("raw") if result.get("spf_record") else None,
+        "dmarc": result.get("dmarc_record", {}).get("raw") if result.get("dmarc_record") else None,
+        "queried_at": result.get("analysis_at"),
+    }
+    
+    store_raw_evidence(
+        workspace_id=job["workspace_id"],
+        job_id=job["id"],
+        source="email_domain_dns",
+        data=raw_evidence,
+    )
+    
+    findings = []
+    
+    # EMAIL_MAIL_INFRASTRUCTURE finding (per design spec)
+    mx_records = result.get("mx_records", [])
+    if mx_records:
+        mx_hosts = [mx["host"] for mx in mx_records]
+        finding = {
+            "finding_type": "EMAIL_MAIL_INFRASTRUCTURE",
+            "subject": email,
+            "confidence": 80,
+            "data": {
+                "domain": domain,
+                "mx_hosts": mx_hosts,
+            },
+        }
+        findings.append(finding)
+        upsert_finding(workspace_id=job["workspace_id"], target_id=job["target_id"], job_id=job["id"], **finding)
+    
+    # EMAIL_SPF_POLICY finding (per design spec)
+    if result.get("spf_record"):
+        spf = result["spf_record"]
+        # Determine mode from all_policy
+        mode_map = {"fail": "hardfail", "softfail": "softfail", "neutral": "neutral", "pass": "pass"}
+        mode = mode_map.get(spf.get("all_policy"), "unknown")
+        
+        finding = {
+            "finding_type": "EMAIL_SPF_POLICY",
+            "subject": email,
+            "confidence": 75,
+            "data": {
+                "mode": mode,
+                "policy": spf.get("raw"),
+            },
+        }
+        findings.append(finding)
+        upsert_finding(workspace_id=job["workspace_id"], target_id=job["target_id"], job_id=job["id"], **finding)
+    
+    # EMAIL_DMARC_POLICY finding (per design spec)
+    if result.get("dmarc_record"):
+        dmarc = result["dmarc_record"]
+        rua = [r.replace("mailto:", "") for r in dmarc.get("rua", [])]
+        
+        finding = {
+            "finding_type": "EMAIL_DMARC_POLICY",
+            "subject": email,
+            "confidence": 75,
+            "data": {
+                "policy": dmarc.get("policy", "none"),
+                "rua": rua,
+            },
+        }
+        findings.append(finding)
+        upsert_finding(workspace_id=job["workspace_id"], target_id=job["target_id"], job_id=job["id"], **finding)
+    
+    logger.info("EMAIL_MX_SPF_DMARC completed", job_id=job["id"], email_hash=email_hash, findings_count=len(findings))
+    return findings
+
+
+# =============================================================================
+# TECHNIQUE: EMAIL_BREACH_LOOKUP
+# =============================================================================
+
+def execute_email_breach_lookup(job: dict) -> list[dict]:
+    """
+    V1 EMAIL_BREACH_LOOKUP - Check email in breach databases.
+    
+    Uses abstract provider:
+    - MockBreachProvider (V1 default - no external calls)
+    - HIBPProvider (phase 2 - requires API key)
+    
+    Produces FindingTypes:
+    - EMAIL_BREACH_STATUS (breached true/false + sources)
+    
+    ⚠️ Ethical rule: NEVER list passwords, hashes, or sensitive data.
+    """
+    from worker_app.email_providers import check_email_breach, get_email_hash
+    from worker_app.security import validate_email_for_osint
+    import hashlib
+    
+    email = job["target_value"]
+    params = job.get("params_json", {}) or {}
+    
+    # Full email validation (canonicalization, length, domain)
+    email_validation = validate_email_for_osint(email)
+    if not email_validation["valid"]:
+        raise ValueError(f"Invalid email: {email_validation['reason']}")
+    
+    # Use canonical form
+    email = email_validation["canonical"]
+    
+    # Security: Hash email for rate limiting and logging
+    email_hash = hashlib.sha256(email.lower().encode()).hexdigest()
+    
+    # Rate limit by email hash (not plaintext)
+    rate_limited_request("email_breach_lookup", domain=f"breach:{email_hash[:16]}")
+    
+    # Security: Log with hashed email, not plaintext
+    logger.info("EMAIL_BREACH_LOOKUP starting", job_id=job["id"], email_hash=email_hash[:16])
+    
+    # Get optional HIBP API key from params (mock by default)
+    hibp_api_key = params.get("hibp_api_key")
+    
+    # Execute breach check
+    result = check_email_breach(email, hibp_api_key=hibp_api_key)
+    
+    # Generate email hashes for privacy-preserving dedupe
+    hashes = get_email_hash(email)
+    
+    # Raw Evidence (per design spec format)
+    raw_evidence = {
+        "email": email,
+        "breached": result.get("breached", False),
+        "sources": [b.get("name") for b in result.get("breaches", [])],
+    }
+    
+    store_raw_evidence(
+        workspace_id=job["workspace_id"],
+        job_id=job["id"],
+        source=f"breach_{result.get('source', 'unknown')}",
+        data=raw_evidence,
+    )
+    
+    findings = []
+    is_mock = result.get("_mock", False)
+    
+    if result.get("breached"):
+        # Breach detected (per design spec)
+        sources = [b.get("name") for b in result.get("breaches", [])]
+        first_seen = None
+        for breach in result.get("breaches", []):
+            if breach.get("date"):
+                if first_seen is None or breach["date"] < first_seen:
+                    first_seen = breach["date"]
+        
+        finding = {
+            "finding_type": "EMAIL_BREACH_STATUS",
+            "subject": email,
+            "confidence": 85 if not is_mock else 50,
+            "data": {
+                "breached": True,
+                "sources": sources,
+                "first_seen": first_seen,
+                # ⚠️ NEVER include: passwords, hashes, PII
+            },
+        }
+        findings.append(finding)
+        upsert_finding(workspace_id=job["workspace_id"], target_id=job["target_id"], job_id=job["id"], **finding)
+    else:
+        # No breach (per design spec)
+        finding = {
+            "finding_type": "EMAIL_BREACH_STATUS",
+            "subject": email,
+            "confidence": 50 if is_mock else 70,  # Low confidence for "no breach"
+            "data": {
+                "breached": False,
+            },
+        }
+        findings.append(finding)
+        upsert_finding(workspace_id=job["workspace_id"], target_id=job["target_id"], job_id=job["id"], **finding)
+    
+    logger.info("EMAIL_BREACH_LOOKUP completed", job_id=job["id"], email_hash=email_hash[:16], breached=result.get("breached"))
+    return findings
+
+
+# =============================================================================
 # Legacy Techniques (aliases for backward compatibility)
 # =============================================================================
 
@@ -1197,6 +1433,10 @@ TECHNIQUE_HANDLERS = {
     # Tier 1 - Username
     "username_github_lookup": execute_username_github_lookup,
     "username_reddit_lookup": execute_username_reddit_lookup,
+    
+    # Tier 1 - Email
+    "email_mx_spf_dmarc_correlation": execute_email_mx_spf_dmarc,
+    "email_breach_lookup": execute_email_breach_lookup,
     
     # Testing
     "noop_lookup": execute_noop_lookup,
@@ -1252,15 +1492,41 @@ def execute_job(self, job_id: str) -> dict:
         # 2. Update status to RUNNING
         update_job_running(job_id)
         
-        # 3. Get technique handler
-        handler = TECHNIQUE_HANDLERS.get(job["technique_code"])
-        if not handler:
-            raise ValueError(f"Unknown technique: {job['technique_code']}")
+        # 3. Validate technique is enabled (config-driven)
+        technique_code = job["technique_code"]
+        ENABLED_TECHNIQUES = {
+            "domain_dns_lookup", "domain_whois_rdap_lookup",
+            "username_github_lookup", "username_reddit_lookup",
+            "email_mx_spf_dmarc_correlation", "email_breach_lookup",
+        }
+        # Allow noop_lookup only in non-prod
+        env = os.getenv("ENV", "local")
+        if env != "prod":
+            ENABLED_TECHNIQUES.add("noop_lookup")
         
-        # 4. Execute technique (stores evidence + findings internally)
+        if technique_code not in ENABLED_TECHNIQUES:
+            # Mark job as FAILED with clear error code
+            update_job_failed(
+                job_id, 
+                error_code="TECHNIQUE_DISABLED",
+                error_message=f"Technique '{technique_code}' is not enabled. Enabled: {sorted(ENABLED_TECHNIQUES)}"
+            )
+            return {
+                "job_id": job_id,
+                "status": "FAILED",
+                "error_code": "TECHNIQUE_DISABLED",
+                "error_message": f"Technique '{technique_code}' is not enabled",
+            }
+        
+        # 4. Get technique handler
+        handler = TECHNIQUE_HANDLERS.get(technique_code)
+        if not handler:
+            raise ValueError(f"Unknown technique: {technique_code}")
+        
+        # 5. Execute technique (stores evidence + findings internally)
         findings = handler(job)
         
-        # 5. Mark as SUCCEEDED
+        # 6. Mark as SUCCEEDED
         update_job_succeeded(job_id)
         
         logger.info(

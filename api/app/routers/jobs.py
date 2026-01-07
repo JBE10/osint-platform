@@ -12,6 +12,7 @@ from app.db.session import get_db
 from app.core.deps import CurrentUser, require_analyst, require_viewer
 from app.core.audit import create_audit_log
 from app.core.metrics import jobs_created, jobs_enqueued
+from app.core.config import settings, validate_technique
 from app.models.workspace import WorkspaceMember
 from app.models.target import Target
 from app.models.job import Job, JobStatus, TechniqueCode, generate_idempotency_key
@@ -137,13 +138,19 @@ def create_jobs_batch(
     job_ids = []
     
     for technique in data.techniques:
-        # Validate technique code
+        # Validate technique is enabled (config-driven allowlist)
+        try:
+            validate_technique(technique)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        
+        # Validate technique code exists in enum
         try:
             TechniqueCode(technique)
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid technique: {technique}. Valid: {[t.value for t in TechniqueCode]}",
+                detail=f"Invalid technique: {technique}. Enabled: {sorted(settings.ENABLED_TECHNIQUES)}",
             )
         
         # Generate idempotency key
@@ -228,14 +235,22 @@ def create_job(
     
     Uses idempotency_key: sha256(workspace+target+technique+params+v1)
     If job already exists with same key → returns existing job (no duplicate).
+    
+    V1 Security: Only allowlisted techniques are accepted.
     """
-    # Validate technique code
+    # Validate technique is enabled (config-driven allowlist)
+    try:
+        validate_technique(data.technique_code)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    # Validate technique code exists in enum
     try:
         TechniqueCode(data.technique_code)
     except ValueError:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid technique_code. Valid: {[t.value for t in TechniqueCode]}",
+            detail=f"Invalid technique_code. Enabled: {sorted(settings.ENABLED_TECHNIQUES)}",
         )
     
     # Verify target exists and belongs to workspace
