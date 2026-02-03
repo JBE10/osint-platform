@@ -61,6 +61,8 @@ services:
       # SECURITY: Set ENV=prod in production with real secrets
       ENV: dev
       DEBUG: "false"
+      CORS_ALLOW_ORIGINS: http://localhost:5173
+      CORS_ALLOW_CREDENTIALS: "false"
       DATABASE_URL: postgresql+psycopg://osint:osint@postgres:5432/osint
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: http://minio:9000
@@ -81,15 +83,35 @@ services:
   worker:
     build: ./worker
     environment:
+      ENV: dev
       DATABASE_URL: postgresql+psycopg://osint:osint@postgres:5432/osint
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minio
+      MINIO_SECRET_KEY: minio123456
+      MINIO_BUCKET: evidence
+      MINIO_SECURE: "false"
     depends_on:
       redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile.dev
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+    depends_on:
+      - api
 
   prometheus:
     image: prom/prometheus:latest

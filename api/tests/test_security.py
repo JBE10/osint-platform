@@ -201,7 +201,7 @@ class TestTechniqueBlocking:
         """Blocked techniques should include dangerous ones."""
         from app.core.config import DISABLED_TECHNIQUES
         
-        dangerous = {"port_scan", "subdomain_enum"}
+        dangerous = {"port_scan", "screenshot"}
         assert dangerous.issubset(DISABLED_TECHNIQUES)
     
     def test_enabled_techniques_are_passive(self):
@@ -212,6 +212,8 @@ class TestTechniqueBlocking:
         passive_techniques = {
             "domain_dns_lookup",      # DNS queries only
             "domain_whois_rdap_lookup",  # Public WHOIS/RDAP
+            "cert_transparency",      # Public CT logs
+            "subdomain_enum",         # CT-based enumeration
             "username_github_lookup",    # Public API
             "username_reddit_lookup",    # Public API
             "email_mx_spf_dmarc_correlation",  # DNS queries
@@ -220,3 +222,12 @@ class TestTechniqueBlocking:
         
         assert DEFAULT_ENABLED_TECHNIQUES == passive_techniques
 
+
+class TestTechniqueParsing:
+    """Parsing tests for ENABLED_TECHNIQUES."""
+
+    def test_enabled_techniques_csv_parsed(self):
+        from app.core.config import Settings
+
+        settings = Settings(ENABLED_TECHNIQUES="a,b,c")
+        assert settings.ENABLED_TECHNIQUES == frozenset({"a", "b", "c"})

@@ -4,7 +4,7 @@ from uuid import UUID
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -29,7 +29,7 @@ class JobCreate(BaseModel):
     """Create a new job."""
     target_id: UUID
     technique_code: str
-    params: dict = {}
+    params: dict = Field(default_factory=dict)
     priority: int = 5  # 1=highest, 10=lowest
     max_attempts: int = 3
 
@@ -38,7 +38,7 @@ class JobBatchCreate(BaseModel):
     """Create multiple jobs for same target with different techniques."""
     target_id: UUID
     techniques: list[str]
-    params: dict = {}
+    params: dict = Field(default_factory=dict)
 
 
 class JobBatchResponse(BaseModel):

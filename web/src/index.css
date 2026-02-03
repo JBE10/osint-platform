@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  font-family: 'Space Grotesk', sans-serif;
+  background: radial-gradient(1200px 600px at 10% 10%, rgba(255, 122, 61, 0.08), transparent 50%),
+              radial-gradient(900px 500px at 80% 20%, rgba(181, 194, 217, 0.08), transparent 60%),
+              #0b1220;
+}
+
+.pattern-grid {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+
+.card {
+  @apply bg-slate/80 border border-white/5 rounded-2xl shadow-lg backdrop-blur;
+}
+
+.btn {
+  @apply px-4 py-2 rounded-xl font-medium transition;
+}
+
+.btn-primary {
+  @apply bg-ember text-ink hover:shadow-glow;
+}
+
+.btn-secondary {
+  @apply bg-white/5 hover:bg-white/10;
+}
+
+.input {
+  @apply w-full rounded-xl bg-white/5 border border-white/10 px-3 py-2 text-sand placeholder:text-mist/70 focus:outline-none focus:ring-2 focus:ring-ember/70;
+}
+
+.table {
+  @apply w-full text-left text-sm;
+}
+
+.table th {
+  @apply text-mist/70 font-medium py-2;
+}
+
+.table td {
+  @apply py-2 border-t border-white/5;
+}

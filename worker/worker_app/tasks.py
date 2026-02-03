@@ -29,8 +29,10 @@ from minio import Minio
 from io import BytesIO
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+import httpx
 
 from worker_app.celery_app import celery_app
+from worker_app.config import settings
 
 logger = structlog.get_logger(__name__)
 
@@ -46,10 +48,11 @@ SessionLocal = sessionmaker(bind=engine)
 # MinIO Configuration
 # =============================================================================
 
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minio")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minio123456")
-MINIO_BUCKET = os.getenv("MINIO_BUCKET", "evidence")
+MINIO_ENDPOINT = settings.MINIO_ENDPOINT
+MINIO_ACCESS_KEY = settings.MINIO_ACCESS_KEY
+MINIO_SECRET_KEY = settings.MINIO_SECRET_KEY
+MINIO_BUCKET = settings.MINIO_BUCKET
+MINIO_SECURE = settings.MINIO_SECURE
 
 
 def get_minio_client() -> Minio:
@@ -57,7 +60,9 @@ def get_minio_client() -> Minio:
     endpoint = MINIO_ENDPOINT
     if endpoint.startswith("http://"):
         endpoint = endpoint[7:]
-    return Minio(endpoint, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, secure=False)
+    elif endpoint.startswith("https://"):
+        endpoint = endpoint[8:]
+    return Minio(endpoint, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, secure=MINIO_SECURE)
 
 
 # =============================================================================
@@ -83,6 +88,8 @@ class OutboundRateLimiter:
         # Domain techniques
         "domain_dns_lookup": (30, 5),       # 30/min, burst 5
         "domain_whois_rdap_lookup": (10, 2), # 10/min, burst 2 (WHOIS is expensive)
+        "cert_transparency": (10, 2),       # 10/min, burst 2
+        "subdomain_enum": (20, 3),          # 20/min, burst 3
         "dns_lookup": (30, 5),
         "whois_lookup": (10, 2),
         
@@ -138,6 +145,8 @@ DOMAIN_THROTTLE = {
     # Domain techniques
     "domain_dns_lookup": 2,           # 2s between same domain DNS lookups
     "domain_whois_rdap_lookup": 60,   # 60s between same domain RDAP lookups (avoid hammering)
+    "cert_transparency": 30,          # 30s between CT queries per domain
+    "subdomain_enum": 60,             # 60s between subdomain enum per domain
     
     # Username techniques (avoid hammering same username)
     "username_github_lookup": 300,    # 5 min between same username lookups
@@ -224,6 +233,49 @@ def rate_limited_request(technique: str, domain: str = None, timeout: float = 30
     if domain:
         if not wait_for_domain_throttle(technique, domain, max_wait=timeout):
             raise Exception(f"Domain throttle timeout for {domain} ({technique})")
+
+
+# =============================================================================
+# Certificate Transparency Utilities
+# =============================================================================
+
+def fetch_cert_transparency(domain: str, max_results: int = 200) -> list[dict]:
+    """
+    Fetch CT log entries from crt.sh.
+    """
+    url = f"https://crt.sh/?q=%25.{domain}&output=json"
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, list):
+                return []
+            return data[:max_results]
+    except Exception as e:
+        logger.warning("CT fetch failed", domain=domain, error=str(e))
+        return []
+
+
+def extract_subdomains_from_ct(domain: str, ct_entries: list[dict]) -> list[str]:
+    """
+    Extract unique subdomains from CT name_value fields.
+    """
+    base = domain.lower().strip(".")
+    subdomains = set()
+    for entry in ct_entries:
+        name_value = entry.get("name_value", "")
+        if not name_value:
+            continue
+        for raw in str(name_value).splitlines():
+            candidate = raw.strip().lower()
+            if candidate.startswith("*."):
+                candidate = candidate[2:]
+            if candidate == base:
+                continue
+            if candidate.endswith("." + base):
+                subdomains.add(candidate)
+    return sorted(subdomains)
 
 
 # =============================================================================
@@ -592,6 +644,176 @@ def parse_dmarc_record(txt_value: str) -> dict:
                 result["aspf"] = value
     
     return result
+
+
+# =============================================================================
+# TECHNIQUE: CERT_TRANSPARENCY
+# =============================================================================
+
+def execute_cert_transparency(job: dict) -> list[dict]:
+    """
+    V1 CERT_TRANSPARENCY - Passive CT log search via crt.sh.
+    Produces:
+    - DOMAIN_CERTIFICATE
+    - DOMAIN_SUBDOMAIN (from name_value)
+    """
+    from worker_app.security import validate_domain_for_osint
+
+    domain = job["target_value"]
+    params = job["params_json"] or {}
+
+    validation = validate_domain_for_osint(domain)
+    if not validation["valid"]:
+        raise ValueError(f"Invalid domain for OSINT: {validation['reason']}")
+    if validation["blocked"]:
+        raise ValueError(f"Blocked domain: {validation['reason']}")
+
+    rate_limited_request("cert_transparency", domain=domain)
+
+    max_results = int(params.get("max_results", 200))
+    ct_entries = fetch_cert_transparency(domain, max_results=max_results)
+    subdomains = extract_subdomains_from_ct(domain, ct_entries)
+
+    raw_data = {
+        "domain": domain,
+        "source": "crt.sh",
+        "queried_at": datetime.utcnow().isoformat() + "Z",
+        "results_count": len(ct_entries),
+        "entries": ct_entries,
+        "subdomains": subdomains,
+    }
+
+    store_raw_evidence(
+        workspace_id=job["workspace_id"],
+        job_id=job["id"],
+        source="crt.sh",
+        data=raw_data,
+        retrieval_meta={"max_results": max_results},
+    )
+
+    findings = []
+
+    for entry in ct_entries:
+        finding = {
+            "finding_type": "DOMAIN_CERTIFICATE",
+            "subject": domain,
+            "confidence": 80,
+            "data": {
+                "issuer": entry.get("issuer_name"),
+                "not_before": entry.get("not_before"),
+                "not_after": entry.get("not_after"),
+                "serial_number": entry.get("serial_number"),
+                "name_value": entry.get("name_value"),
+            },
+        }
+        findings.append(finding)
+        upsert_finding(workspace_id=job["workspace_id"], target_id=job["target_id"], job_id=job["id"], **finding)
+
+    for subdomain in subdomains:
+        finding = {
+            "finding_type": "DOMAIN_SUBDOMAIN",
+            "subject": subdomain,
+            "confidence": 85,
+            "data": {
+                "parent_domain": domain,
+                "source": "crt.sh",
+            },
+        }
+        findings.append(finding)
+        upsert_finding(workspace_id=job["workspace_id"], target_id=job["target_id"], job_id=job["id"], **finding)
+
+    logger.info("CERT_TRANSPARENCY completed", job_id=job["id"], domain=domain, entries=len(ct_entries))
+    return findings
+
+
+# =============================================================================
+# TECHNIQUE: SUBDOMAIN_ENUM
+# =============================================================================
+
+def execute_subdomain_enum(job: dict) -> list[dict]:
+    """
+    V1 SUBDOMAIN_ENUM - Passive subdomain enumeration via CT logs.
+    Optionally resolves A/AAAA records for discovered subdomains.
+    """
+    from worker_app.security import validate_domain_for_osint
+
+    domain = job["target_value"]
+    params = job["params_json"] or {}
+
+    validation = validate_domain_for_osint(domain)
+    if not validation["valid"]:
+        raise ValueError(f"Invalid domain for OSINT: {validation['reason']}")
+    if validation["blocked"]:
+        raise ValueError(f"Blocked domain: {validation['reason']}")
+
+    rate_limited_request("subdomain_enum", domain=domain)
+
+    max_results = int(params.get("max_results", 200))
+    max_subdomains = int(params.get("max_subdomains", 200))
+    resolve_dns = bool(params.get("resolve_dns", False))
+
+    ct_entries = fetch_cert_transparency(domain, max_results=max_results)
+    subdomains = extract_subdomains_from_ct(domain, ct_entries)[:max_subdomains]
+
+    resolver = dns.resolver.Resolver()
+    resolver.timeout = params.get("timeout", 5)
+    resolver.lifetime = params.get("lifetime", 15)
+
+    resolved = {}
+    if resolve_dns:
+        for subdomain in subdomains:
+            ips = []
+            try:
+                for rdata in resolver.resolve(subdomain, "A"):
+                    ips.append(str(rdata))
+            except Exception:
+                pass
+            try:
+                for rdata in resolver.resolve(subdomain, "AAAA"):
+                    ips.append(str(rdata))
+            except Exception:
+                pass
+            resolved[subdomain] = ips
+
+    raw_data = {
+        "domain": domain,
+        "source": "crt.sh",
+        "queried_at": datetime.utcnow().isoformat() + "Z",
+        "subdomains": subdomains,
+        "resolved": resolved,
+    }
+
+    store_raw_evidence(
+        workspace_id=job["workspace_id"],
+        job_id=job["id"],
+        source="subdomain_enum",
+        data=raw_data,
+        retrieval_meta={
+            "max_results": max_results,
+            "max_subdomains": max_subdomains,
+            "resolve_dns": resolve_dns,
+        },
+    )
+
+    findings = []
+    for subdomain in subdomains:
+        ips = resolved.get(subdomain, [])
+        finding = {
+            "finding_type": "DOMAIN_SUBDOMAIN",
+            "subject": subdomain,
+            "confidence": 80 if ips else 60,
+            "data": {
+                "parent_domain": domain,
+                "is_resolved": bool(ips),
+                "ips": ips,
+                "source": "ct_logs",
+            },
+        }
+        findings.append(finding)
+        upsert_finding(workspace_id=job["workspace_id"], target_id=job["target_id"], job_id=job["id"], **finding)
+
+    logger.info("SUBDOMAIN_ENUM completed", job_id=job["id"], domain=domain, subdomains=len(subdomains))
+    return findings
 
 
 # =============================================================================
@@ -1429,6 +1651,8 @@ TECHNIQUE_HANDLERS = {
     # Tier 1 - Domain
     "domain_dns_lookup": execute_domain_dns_lookup,
     "domain_whois_rdap_lookup": execute_domain_whois_rdap_lookup,
+    "cert_transparency": execute_cert_transparency,
+    "subdomain_enum": execute_subdomain_enum,
     
     # Tier 1 - Username
     "username_github_lookup": execute_username_github_lookup,
@@ -1494,14 +1718,8 @@ def execute_job(self, job_id: str) -> dict:
         
         # 3. Validate technique is enabled (config-driven)
         technique_code = job["technique_code"]
-        ENABLED_TECHNIQUES = {
-            "domain_dns_lookup", "domain_whois_rdap_lookup",
-            "username_github_lookup", "username_reddit_lookup",
-            "email_mx_spf_dmarc_correlation", "email_breach_lookup",
-        }
-        # Allow noop_lookup only in non-prod
-        env = os.getenv("ENV", "local")
-        if env != "prod":
+        ENABLED_TECHNIQUES = set(settings.ENABLED_TECHNIQUES)
+        if not settings.is_production:
             ENABLED_TECHNIQUES.add("noop_lookup")
         
         if technique_code not in ENABLED_TECHNIQUES:

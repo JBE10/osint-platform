@@ -323,6 +323,27 @@ class TestFingerprintStability:
 
 
 # ============================================================================
+# Certificate Transparency Parsing Tests
+# ============================================================================
+
+def test_extract_subdomains_from_ct():
+    from worker_app.tasks import extract_subdomains_from_ct
+
+    domain = "example.com"
+    ct_entries = [
+        {"name_value": "www.example.com"},
+        {"name_value": "api.example.com\n*.cdn.example.com"},
+        {"name_value": "example.com"},
+    ]
+
+    subdomains = extract_subdomains_from_ct(domain, ct_entries)
+    assert "www.example.com" in subdomains
+    assert "api.example.com" in subdomains
+    assert "cdn.example.com" in subdomains
+    assert "example.com" not in subdomains
+
+
+# ============================================================================
 # Edge Cases
 # ============================================================================
 
@@ -371,4 +392,3 @@ class TestEdgeCases:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-

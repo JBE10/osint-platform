@@ -3,7 +3,7 @@ from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -26,7 +26,7 @@ class TargetCreate(BaseModel):
     target_type: str
     value: str
     label: Optional[str] = None
-    extra_data: dict = {}
+    extra_data: dict = Field(default_factory=dict)
 
 
 class EmailTargetCreate(BaseModel):

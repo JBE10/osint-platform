@@ -5,7 +5,7 @@ Open Source Intelligence platform for passive investigations.
 ## Features
 
 - **3 Target Types**: DOMAIN, USERNAME, EMAIL
-- **6 OSINT Techniques**: All passive, legal, non-intrusive
+- **8 OSINT Techniques**: All passive, legal, non-intrusive
 - **Audit Trail**: Full logging of all actions
 - **Evidence Storage**: Immutable raw evidence + normalized findings
 
@@ -81,6 +81,8 @@ All endpoints are prefixed with `/v1/`.
 |-----------|--------|-------------|
 | `domain_dns_lookup` | DOMAIN | A, AAAA, MX, NS, TXT, SPF, DMARC |
 | `domain_whois_rdap_lookup` | DOMAIN | RDAP/WHOIS registrar info |
+| `cert_transparency` | DOMAIN | CT log discovery (passive) |
+| `subdomain_enum` | DOMAIN | Passive subdomain enumeration |
 | `username_github_lookup` | USERNAME | GitHub profile |
 | `username_reddit_lookup` | USERNAME | Reddit profile |
 | `email_mx_spf_dmarc_correlation` | EMAIL | Email domain config |
@@ -159,6 +161,12 @@ CREATED → QUEUED → RUNNING → SUCCEEDED
 | `JWT_SECRET_KEY` | **Yes (prod)** | JWT signing key |
 | `DATABASE_URL` | No | PostgreSQL connection |
 | `REDIS_URL` | No | Redis connection |
+| `ENABLED_TECHNIQUES` | No | CSV list to override enabled techniques |
+| `CORS_ALLOW_ORIGINS` | No | CSV list of allowed origins (prod: required) |
+| `CORS_ALLOW_CREDENTIALS` | No | `true`/`false` (default: false) |
+| `CORS_ALLOW_METHODS` | No | CSV list of allowed methods |
+| `CORS_ALLOW_HEADERS` | No | CSV list of allowed headers |
+| `MINIO_SECURE` | No | Use TLS for MinIO (`true`/`false`) |
 
 ### Production Deployment
 
@@ -166,10 +174,23 @@ CREATED → QUEUED → RUNNING → SUCCEEDED
 # Generate secrets
 export JWT_SECRET_KEY=$(openssl rand -hex 32)
 export POSTGRES_PASSWORD=$(openssl rand -hex 16)
+export CORS_ALLOW_ORIGINS=https://your-ui.example.com
 
 # Deploy
 ENV=prod docker compose -f docker-compose.prod.yml up -d
 ```
+
+## Web UI (MVP)
+
+The project includes a React + Vite frontend in `web/`.
+
+```bash
+docker compose up -d --build
+open http://localhost:5173
+```
+
+Environment:
+`VITE_API_BASE_URL` (default `http://localhost:8000`)
 
 ## Development
 

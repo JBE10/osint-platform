@@ -9,6 +9,7 @@ import sys
 from enum import Enum
 
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 
 
 class Environment(str, Enum):
@@ -25,6 +26,8 @@ class Environment(str, Enum):
 DEFAULT_ENABLED_TECHNIQUES = frozenset([
     "domain_dns_lookup",
     "domain_whois_rdap_lookup",
+    "cert_transparency",
+    "subdomain_enum",
     "username_github_lookup",
     "username_reddit_lookup",
     "email_mx_spf_dmarc_correlation",
@@ -33,8 +36,6 @@ DEFAULT_ENABLED_TECHNIQUES = frozenset([
 
 # Techniques that exist but are disabled in V1
 DISABLED_TECHNIQUES = frozenset([
-    "subdomain_enum",
-    "cert_transparency",
     "email_verify",
     "port_scan",
     "screenshot",
@@ -113,6 +114,15 @@ class Settings(BaseSettings):
     RATE_LIMIT_AUTH: int = 5      # Login/register attempts
     RATE_LIMIT_READ: int = 120    # GET requests
     RATE_LIMIT_MUTATE: int = 30   # POST/PUT/DELETE requests
+
+    # ==========================================================================
+    # CORS
+    # ==========================================================================
+    # Comma-separated list or '*' (no credentials if '*')
+    CORS_ALLOW_ORIGINS: list[str] = ["*"]
+    CORS_ALLOW_CREDENTIALS: bool = False
+    CORS_ALLOW_METHODS: list[str] = ["*"]
+    CORS_ALLOW_HEADERS: list[str] = ["*"]
     
     # ==========================================================================
     # MinIO
@@ -129,6 +139,30 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+
+    @field_validator("ENABLED_TECHNIQUES", mode="before")
+    @classmethod
+    def _parse_enabled_techniques(cls, value):
+        if value is None:
+            return DEFAULT_ENABLED_TECHNIQUES
+        if isinstance(value, (set, frozenset, list, tuple)):
+            return frozenset(value)
+        if isinstance(value, str):
+            items = [v.strip() for v in value.split(",") if v.strip()]
+            return frozenset(items) if items else DEFAULT_ENABLED_TECHNIQUES
+        return DEFAULT_ENABLED_TECHNIQUES
+
+    @field_validator("CORS_ALLOW_ORIGINS", "CORS_ALLOW_METHODS", "CORS_ALLOW_HEADERS", mode="before")
+    @classmethod
+    def _parse_csv_list(cls, value):
+        if value is None:
+            return ["*"]
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            items = [v.strip() for v in value.split(",") if v.strip()]
+            return items if items else ["*"]
+        return ["*"]
     
     @property
     def is_production(self) -> bool:
@@ -181,6 +215,12 @@ class Settings(BaseSettings):
             errors.append(
                 "SECURITY WARNING: MinIO using default credentials. "
                 "Set MINIO_ACCESS_KEY and MINIO_SECRET_KEY."
+            )
+
+        # Check CORS in prod
+        if self.CORS_ALLOW_CREDENTIALS and "*" in self.CORS_ALLOW_ORIGINS:
+            errors.append(
+                "SECURITY ERROR: CORS_ALLOW_ORIGINS cannot be '*' when credentials are allowed."
             )
         
         # Check noop_lookup is disabled in prod

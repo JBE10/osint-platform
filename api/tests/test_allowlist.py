@@ -4,6 +4,8 @@ Tests for V1 technique allowlist.
 Only these techniques are allowed:
 - domain_dns_lookup
 - domain_whois_rdap_lookup
+- cert_transparency
+- subdomain_enum
 - username_github_lookup
 - username_reddit_lookup
 - email_mx_spf_dmarc_correlation
@@ -40,6 +42,8 @@ class TestTechniqueAllowlist:
     @pytest.mark.parametrize("technique", [
         "domain_dns_lookup",
         "domain_whois_rdap_lookup",
+        "cert_transparency",
+        "subdomain_enum",
     ])
     def test_allowed_domain_techniques(
         self, client: TestClient, test_workspace, auth_headers, target_id, technique
@@ -61,8 +65,6 @@ class TestTechniqueAllowlist:
     
     @pytest.mark.parametrize("technique,expected_error", [
         ("port_scan", "not enabled"),
-        ("subdomain_enum", "not enabled"),
-        ("cert_transparency", "not enabled"),
         ("screenshot", "not enabled"),
         ("email_verify", "not enabled"),  # Legacy
         ("social_lookup", "not enabled"),
@@ -129,7 +131,7 @@ class TestConfigDrivenAllowlist:
         from app.core.config import settings
         
         assert hasattr(settings, "ENABLED_TECHNIQUES")
-        assert len(settings.ENABLED_TECHNIQUES) >= 6
+        assert len(settings.ENABLED_TECHNIQUES) >= 8
     
     def test_validate_technique_function(self):
         """validate_technique should raise for disabled techniques."""
@@ -151,4 +153,3 @@ class TestConfigDrivenAllowlist:
         assert settings.is_technique_enabled("domain_dns_lookup") is True
         assert settings.is_technique_enabled("port_scan") is False
         assert settings.is_technique_enabled("nonexistent") is False
-

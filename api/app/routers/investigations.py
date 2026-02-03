@@ -4,7 +4,7 @@ from uuid import UUID
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -28,7 +28,7 @@ class InvestigationCreate(BaseModel):
     """Create investigation request."""
     name: str
     description: Optional[str] = None
-    tags: list[str] = []
+    tags: list[str] = Field(default_factory=list)
 
 
 class InvestigationResponse(BaseModel):
@@ -311,4 +311,3 @@ def list_investigation_findings(
         }
         for f in findings
     ]
-

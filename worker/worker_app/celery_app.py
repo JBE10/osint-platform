@@ -1,6 +1,10 @@
 import os
 from celery import Celery
 
+from worker_app.config import check_production_safety
+
+check_production_safety()
+
 broker = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/1")
 backend = os.getenv("CELERY_RESULT_BACKEND", "redis://redis:6379/2")
 
